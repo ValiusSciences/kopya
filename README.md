@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml/badge.svg)](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml)
 
-Expression-only single-cell CNV caller: a pure-Python, pip-installable alternative to the R-based tools for calling copy-number variation from scRNA-seq.
+Expression-only single-cell CNV caller: a pure-Python, pip-installable tool that finds the diploid baseline, segments the genome, and calls tumor vs normal automatically. An end-to-end, R-free alternative to CopyKAT, SCEVAN, and inferCNV.
 
 ## Motivation
 
@@ -16,6 +16,8 @@ Four R-based CNV callers dominate this space, each with a different sharp edge:
 | **CONICSmat** | Arm-level only, no focal events |
 
 We wanted **one Python package, one pip install, sparse-first, with opinionated defaults** that we can validate against the originals. Allele-aware calling (LOH, copy-neutral) stays the domain of Numbat; see [`docs/comparison.md`](docs/comparison.md) for the full positioning.
+
+**What about [infercnvpy](https://github.com/icbi-lab/infercnvpy)?** It is the closest peer: also pure-Python and scanpy-native. The difference is scope. infercnvpy computes a CNV-signal matrix and leaves baseline selection, segmentation, and the tumor/normal decision to you (or delegates the actual call to R CopyKAT). kopya is an end-to-end **caller** that automates all three: it finds the diploid baseline, segments the genome into discrete CNV regions, and emits tumor / normal / uncertain calls with QC gates and CopyKAT-drop-in outputs. See [`docs/comparison.md`](docs/comparison.md#closest-peer-infercnvpy) for the detailed head-to-head.
 
 ## What we borrowed from the field
 
@@ -31,7 +33,7 @@ The algorithm is not novel; it is a careful synthesis of the best ideas from the
 | 2-component GMM on L1 deviation from baseline, giving tumor / normal | CopyKAT |
 | Per-segment CN matrix, Leiden-clustered into subclones | SCEVAN |
 
-Our contribution is engineering: a single sparse-first Python package that runs the same ideas well over 100× faster (see the scaling table below), in a fraction of the memory, installs in one step, and produces CopyKAT-compatible output files so an existing CopyKAT-based pipeline needs no changes.
+Our contribution is twofold. First, **an end-to-end automated caller**: kopya finds the diploid baseline, segments the genome into discrete CNV regions, and calls tumor / normal / uncertain with QC gates, rather than handing you a signal matrix to interpret yourself. Second, **the engineering**: a single sparse-first Python package that runs the same ideas well over 100× faster than the R tools (see the scaling table below), in a fraction of the memory, installs in one step, and produces CopyKAT-compatible output files so an existing CopyKAT-based pipeline needs no changes.
 
 ## How it works
 
