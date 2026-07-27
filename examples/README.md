@@ -23,7 +23,7 @@ what the numbers mean. The tumor population reads chr7 ≈ 1.8 and chr10 ≈ 0.3
 > **Note on `qc.json`'s `baseline_method: gmm_fallback`.** This synthetic fixture
 > has no immune/stromal expression signatures for the baseline cascade to lock
 > onto, so it correctly falls through to the GMM fallback tier. The calls are
-> still exact (300 tumor / 200 normal) — on real immune-infiltrated tumors the
+> still exact (300 tumor / 200 normal); on real immune-infiltrated tumors the
 > cascade normally settles on the higher `signature` or `variance` tier.
 
 ### Files
@@ -31,7 +31,7 @@ what the numbers mean. The tumor population reads chr7 ≈ 1.8 and chr10 ≈ 0.3
 | File | What it is |
 |------|-----------|
 | `prediction.csv` | per-cell `class` / `confidence` / `tumor_score` / `subclone` / `n_segments_altered` / `low_complexity` |
-| `segments.parquet` | segment → genome map (`segment_id`, `chr`, gene-axis indices, `start_bp`/`end_bp`, `n_genes`, `tumor_mean`) |
+| `segments.parquet` | segment-to-genome map (`segment_id`, `chr`, gene-axis indices, `start_bp`/`end_bp`, `n_genes`, `tumor_mean`) |
 | `cn_per_segment.npz` | dense per-cell × per-segment CN matrix (`cn`) + `cell_barcodes` |
 | `cn_per_segment_denoised.npz` | same shape, but **recentered + denoised** (opt-in via `--denoise-outputs`): a clean gain/loss matrix (0 ≈ diploid, >0 gain, <0 loss) where the normal floor collapses to ~0 and hallmark events survive |
 | `chr_cnv_matrix.csv` | per-cell × per-chromosome summary, 1.0-centered |
@@ -59,5 +59,5 @@ kopya plot-heatmap \
 ```
 
 `qc.json` records per-step wall-clock timings and the package version, so those
-fields will differ slightly on each regeneration — the analysis outputs are
+fields will differ slightly on each regeneration; the analysis outputs are
 deterministic.
