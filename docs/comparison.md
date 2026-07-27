@@ -8,9 +8,52 @@ Where kopya sits relative to the existing scRNA-seq CNV callers.
 
 Numbat stays as the allele-aware companion. The external gold-standard test suite ([`../tests/external/GOLD_STANDARD_TESTING.md`](../tests/external/GOLD_STANDARD_TESTING.md)) is how kopya is validated against independently-established CNV ground truth.
 
+## Closest peer: infercnvpy
+
+[infercnvpy](https://github.com/icbi-lab/infercnvpy) is the most direct comparison, and the one worth reading carefully: it is also pure-Python, matrix-only, scanpy-native, and derived from Broad inferCNV. The honest distinction is scope, not language or speed.
+
+**infercnvpy is a CNV-signal toolkit; kopya is an end-to-end caller.** infercnvpy computes a smoothed CNV matrix and leaves baseline selection, segmentation, and the tumor/normal decision to you (or delegates the actual call to R CopyKAT via `tl.copykat`). kopya automates all three.
+
+### Same core idea
+
+Both center position-ordered expression against a normal reference and smooth along the chromosome. infercnvpy uses a pyramidal (triangular) running mean (window 100 genes, step 10) over clipped log-fold-change; kopya uses a uniform moving average. On the pure CNV-signal step the two are the same family, and infercnvpy's core is actually faster than kopya's (see the head-to-head below). The divergence is entirely in what happens after the smoothing.
+
+### What kopya adds that infercnvpy leaves to you
+
+| Layer | infercnvpy | kopya |
+|---|---|---|
+| Baseline / normal pool | You label normals (`reference_cat`), or it averages all cells (which silently inverts on high-purity or mesenchymal samples) | Automatic 4-mode cascade (supervised, then UCell signatures, then variance cluster, then GMM fallback) that finds the diploid pool |
+| CNV representation | Fixed-resolution smoothed matrix (window/step); no boundaries, no discrete states | PELT changepoint segmentation into discrete, variable-length segments (one shared cohort table) |
+| Tumor/normal call | None native: `cnv_score` is mean-absolute CNV per Leiden cluster and you decide by eye, or `tl.copykat` shells out to R CopyKAT | Native 2-component GMM on the L1 aneuploidy score, with an explicit `uncertain` band, a Tukey outlier fence, and coherence + low-complexity QC gates |
+| Subclones | Generic scanpy Leiden on all cells | Leiden on tumor-only segment CN, resolution sweep, capped at `max_subclones` |
+| Outputs | `X_cnv` matrix on the AnnData | CopyKAT-drop-in `prediction.csv` / `chr_cnv_matrix.csv`, IGV `.seg`, per-segment parquet, `qc.json` |
+| Gene hygiene | You prepare `.var` positions | GENCODE projection plus drops chrY / MT / HLA / cell-cycle / immunoglobulin genes |
+
+The three that matter most: kopya **segments** the signal (it finds where copy number changes, which is what enables IGV `.seg`, focal boundaries, and CopyKAT-style output) where infercnvpy blurs at a fixed resolution; kopya **finds the baseline automatically** where infercnvpy needs labeled normals or silently inverts on the hard cases; and kopya **makes the call** with false-positive controls where infercnvpy stops at a matrix and, tellingly, hands the actual calling back to R CopyKAT.
+
+### Where infercnvpy is equal or ahead
+
+- Faster core CNV inference and lower peak memory at a given cell count (compact windowed matrix).
+- A multi-reference "bounded" difference (min/max across reference cell types before centering) that mitigates HLA / immunoglobulin bias; kopya instead drops those genes.
+- Intratumoral-heterogeneity metrics (`ithcna` / `ithgex`, the IQR of intra-group CNV/expression correlation) that kopya does not compute.
+- More mature: published, maintained, citable, and long embedded in the scanpy ecosystem.
+
+### Head to head (same real 900k-cell NSCLC matrix, subsampled)
+
+Both tools run their full standard workflow: kopya's `run`, and infercnvpy's `infercnv` plus the PCA + Leiden + `cnv_score` needed to turn the matrix into calls.
+
+| cells | kopya wall | infercnvpy wall | infercnvpy core | infercnvpy downstream |
+|---:|---:|---:|---:|---:|
+| 5,000 | 14 s | 7 s | 1.7 s | 3.6 s |
+| 25,000 | 18 s | 24 s | 2.6 s | 19 s |
+| 50,000 | 26 s | 61 s | 6 s | 52 s |
+| 100,000 | 46 s | 167 s | 15 s | 149 s |
+
+infercnvpy's CNV inference is fast at every size; its end-to-end time is dominated by the generic PCA + Leiden clustering required to turn the matrix into tumor calls, which scales super-linearly. kopya folds calling into the pipeline and stays near-linear, so it pulls ahead from roughly 10k cells upward. (One operational note: infercnvpy's default multiprocessing failed on macOS + Python 3.13 and needed the `fork` start method to run at all.)
+
 ## What we share with the matrix-only callers
 
-Same lane as CopyKAT, SCEVAN, inferCNV, CONICSmat:
+Same lane as CopyKAT, SCEVAN, inferCNV / infercnvpy, CONICSmat:
 
 - Matrix-only input (counts.mtx or AnnData); no BAM, no SNP pileup
 - Expression-only signal — copy-neutral LOH and balanced rearrangements are invisible to all of us
@@ -57,6 +100,7 @@ Same lane as CopyKAT, SCEVAN, inferCNV, CONICSmat:
 | Tool          | Input         | Allele-aware | Needs normal ref?            | Subclones                | Runtime (~10k cells) | RAM (~10k cells) | Install friction |
 |--------------|---------------|--------------|------------------------------|--------------------------|----------------------|------------------|------------------|
 | **kopya** | matrix    | No           | No (signature/variance cascade) | Yes (Leiden)             | ~12 s                | ~1.8 GB          | Low (one pip)    |
+| infercnvpy   | matrix        | No           | No (mean-of-all default)     | Via generic Leiden       | ~16 s (calling downstream dominates at scale) | ~1.2 GB | Low (one pip) |
 | CopyKAT      | matrix        | No           | No (auto baseline)           | Ward dendrogram          | ~1–2 h               | 30–60 GB         | Medium (GitHub install) |
 | SCEVAN       | matrix        | No           | No (signature library)       | Yes, native + tree       | ~30–60 min           | 30–60 GB         | Medium (GitHub two-step) |
 | CONICSmat    | matrix + BED  | No           | No (GMM)                     | From binarized matrix    | minutes–hour         | low              | Low (R + biomaRt) |
