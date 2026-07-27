@@ -1,0 +1,39 @@
+# IPISRC044_T1 (UCSF osteosarcoma, Tumor 1) — bulk-exome CNV truth (distilled)
+# Purpose: reproducible ground truth for tests/external/test_ipisrc044_osteosarcoma.py
+# cnvkit_log2     : per-region log2 ratio, length-weighted mean of gene-level CNVkit
+#                   calls (vs matched normal).
+# ploidy_norm_cn  : ploidy-normalized integer copy number from an independent DNA
+#                   platform, mean of gene-level calls — a cross-check for cnvkit_log2.
+# level=chromosome : all 22 autosomes (chrX/chrY excluded; autosome-only calling).
+# level=arm        : p/q arms split at hg38 centromere midpoints, for the confirmed arm-discordant
+#                    chromosomes chr1, chr10, chr17. chr10 is the headline case: p retained, q lost.
+# Both columns are median-centered across chromosomes at test time before comparison.
+region,level,cnvkit_log2,ploidy_norm_cn
+chr1,chromosome,0.2845,-0.318
+chr2,chromosome,0.4649,-0.0321
+chr3,chromosome,0.7914,0.4794
+chr4,chromosome,0.8906,0.6819
+chr5,chromosome,1.0,1.0
+chr6,chromosome,0.8739,0.6074
+chr7,chromosome,0.8479,0.6271
+chr8,chromosome,0.8691,0.6151
+chr9,chromosome,0.7196,0.5468
+chr10,chromosome,0.1344,-0.7332
+chr11,chromosome,0.3589,-0.3656
+chr12,chromosome,0.9096,0.785
+chr13,chromosome,0.585,0.0
+chr14,chromosome,1.0,1.0
+chr15,chromosome,0.7627,0.4164
+chr16,chromosome,0.4738,-0.1889
+chr17,chromosome,0.4277,-0.2976
+chr18,chromosome,0.585,0.0
+chr19,chromosome,0.2281,-0.6365
+chr20,chromosome,0.5847,-0.0032
+chr21,chromosome,-0.0469,-1.0
+chr22,chromosome,0.585,0.0
+chr1p,arm,0.0028,-0.993
+chr1q,arm,0.6486,0.4533
+chr10p,arm,0.585,0.0
+chr10q,arm,-0.0415,-1.0
+chr17p,arm,0.0,-1.0
+chr17q,arm,0.585,0.0

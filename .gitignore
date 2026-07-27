@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.venv/
+.env
+*.log
+.DS_Store
+
+# Downloaded external benchmark / large data files — not for git
+external-benchmarks/
+*.gz
+*.h5ad
+*.h5
+*.mtx
+*.loom
+
+# ...but the committed synthetic CI fixture must be tracked (tests depend on it).
+!tests/fixtures/tiny_simulated.h5ad

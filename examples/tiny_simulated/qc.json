@@ -1,0 +1,130 @@
+{
+  "sample": "tiny_simulated",
+  "kopya_version": "1.0.0",
+  "milestone": "M4",
+  "threads": 8,
+  "subclones_enabled": true,
+  "supervised": false,
+  "gene_order_overridden": false,
+  "signatures_overridden": false,
+  "non_malignant_labels_overridden": false,
+  "params": {
+    "min_genes": 200,
+    "low_dr": 0.05,
+    "up_dr": 1.0,
+    "normal_score_threshold": 0.3,
+    "min_normal_cells": 50,
+    "smooth_window": 100,
+    "penalty_coef": 1.0,
+    "min_seg_genes": 25,
+    "call_confidence": 0.5,
+    "max_subclones": 5,
+    "coherence_gate": 0.45,
+    "low_complexity_frac": 0.5,
+    "denoise_outputs": true,
+    "sd_amplifier": 1.0,
+    "block_size": 500
+  },
+  "n_cells_loaded": 500,
+  "n_genes_loaded": 1830,
+  "n_cells_post_m1": 500,
+  "n_genes_post_m1": 1819,
+  "baseline_method": "gmm_fallback",
+  "n_normal_seed": 200,
+  "baseline_diagnostics": {
+    "signature_attempted": {
+      "n_passed_threshold": 0,
+      "n_confident_normal": 0,
+      "threshold": 0.3,
+      "per_label_counts": {
+        "T_cell": 0,
+        "B_cell": 0,
+        "NK_cell": 0,
+        "Myeloid": 0,
+        "Neutrophil": 0,
+        "Plasma_cell": 0,
+        "Endothelial": 0,
+        "Fibroblast": 0,
+        "Pericyte": 0,
+        "Osteoblast": 0,
+        "Smooth_muscle": 0
+      },
+      "non_malignant_labels": [
+        "T_cell",
+        "B_cell",
+        "NK_cell",
+        "Myeloid",
+        "Neutrophil",
+        "Endothelial",
+        "Fibroblast",
+        "Pericyte",
+        "Osteoblast",
+        "Smooth_muscle"
+      ],
+      "median_top_score": 0.0
+    },
+    "variance_attempted": {
+      "n_clusters": 4,
+      "winner_cluster": "2",
+      "winner_variance": 0.3404867947101593,
+      "all_variances": {
+        "0": 0.3507404923439026,
+        "1": 0.35568249225616455,
+        "2": 0.3404867947101593,
+        "3": 0.3549169898033142
+      },
+      "n_normal": 29
+    },
+    "gmm": {
+      "component_means": [
+        0.5472118854522705,
+        0.3523712158203125
+      ],
+      "low_component": 1,
+      "n_normal": 200
+    }
+  },
+  "n_segments": 45,
+  "n_segments_per_chr": {
+    "chr7": 4,
+    "chr1": 3,
+    "chr19": 3,
+    "chr5": 3,
+    "chr6": 3,
+    "chr10": 3,
+    "chr11": 3,
+    "chr2": 2,
+    "chr17": 2,
+    "chr16": 2,
+    "chr15": 2,
+    "chr12": 2,
+    "chr9": 2,
+    "chr4": 2,
+    "chr3": 2,
+    "chr13": 1,
+    "chr14": 1,
+    "chr8": 1,
+    "chr18": 1,
+    "chr20": 1,
+    "chr21": 1,
+    "chr22": 1
+  },
+  "median_segment_genes": 35,
+  "tumor_signal_max_abs": 1.2648187685809615,
+  "n_tumor": 300,
+  "n_normal_called": 200,
+  "n_uncertain": 0,
+  "n_low_complexity": 0,
+  "n_subclones_observed": 2,
+  "subclone_counts": {
+    "subclone_1": 283,
+    "subclone_2": 17
+  },
+  "timings_secs": {
+    "load": 0.02,
+    "m1_filter_normalize_project": 0.17,
+    "m2_pick_baseline": 4.13,
+    "m3_smooth_segment_cn": 0.13,
+    "m4_classify_write_outputs": 0.03
+  }
+}

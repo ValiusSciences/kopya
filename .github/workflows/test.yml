@@ -1,0 +1,67 @@
+# GitHub Actions CI for kopya.
+#
+# Runs the full pytest suite on every push to main and every pull request.
+# pyproject.toml is the source of truth for runtime + dev dependencies, so
+# the install step is just `pip install -e .[dev]` — no separate requirements
+# files to drift.
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets us trigger a manual run from the Actions tab if a CI environment
+  # bug needs re-running without a code push.
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same ref when a new commit lands; saves CI
+# minutes on rapid pushes (common during a PR review cycle).
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      # Run every Python version even if one fails so we see the full matrix
+      # of failures in one CI pass.
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Built-in pip cache keyed on pyproject.toml; cuts ~30-60s off
+          # subsequent runs once the cache warms up.
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + dev extras
+        # Editable install so pytest discovers the package via the live src
+        # tree; --upgrade-strategy=eager surfaces dep-resolution conflicts
+        # at CI time rather than at user-install time.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade-strategy eager -e ".[dev]"
+
+      - name: Show installed package versions
+        # Helpful when CI fails on a fresh dep release; the run log shows
+        # exactly which version regressed.
+        run: pip list
+
+      - name: Run pytest
+        # -ra surfaces skip/xfail/error summaries; --strict-markers catches
+        # typos in @pytest.mark decorators.
+        run: pytest -ra --strict-markers
