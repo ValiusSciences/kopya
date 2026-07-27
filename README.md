@@ -1,5 +1,7 @@
 # kopya
 
+[![tests](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml/badge.svg)](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml)
+
 Expression-only single-cell CNV caller — a pure-Python, pip-installable alternative to the R-based tools for calling copy-number variation from scRNA-seq.
 
 ---
