@@ -31,7 +31,7 @@ The algorithm is not novel; it is a careful synthesis of the best ideas from the
 | 2-component GMM on L1 deviation from baseline, giving tumor / normal | CopyKAT |
 | Per-segment CN matrix, Leiden-clustered into subclones | SCEVAN |
 
-Our contribution is engineering: a single sparse-first Python package that runs the same ideas ~100× faster, in a fraction of the memory, installs in one step, and produces CopyKAT-compatible output files so an existing CopyKAT-based pipeline needs no changes.
+Our contribution is engineering: a single sparse-first Python package that runs the same ideas well over 100× faster (see the scaling table below), in a fraction of the memory, installs in one step, and produces CopyKAT-compatible output files so an existing CopyKAT-based pipeline needs no changes.
 
 ## How it works
 
