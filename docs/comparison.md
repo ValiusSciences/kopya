@@ -33,7 +33,7 @@ Same lane as CopyKAT, SCEVAN, inferCNV, CONICSmat:
 |----------------------|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
 | Language             | R (all four matrix-only callers)                                                                  | Python (numpy/scipy/scanpy/sklearn)                                                                  |
 | Install              | bioconda broken (inferCNV), GitHub two-step (SCEVAN), Rgraphviz hell (CaSpER)                     | one pip install, one conda env, no JAGS / no Rgraphviz                                              |
-| Matrix layout        | Densified genes × cells (CopyKAT: 30–60 GB at 10k cells)                                          | Sparse CSR throughout M1+M2; dense only in M3+M4 — `mem_mb=32000` vs `128000`                       |
+| Matrix layout        | Densified genes × cells (CopyKAT: 30–60 GB at 10k cells)                                          | Sparse CSR throughout M1+M2; dense only in M3+M4 — ~1.8 GB peak at 10k cells vs CopyKAT's 30–60 GB   |
 | Segmentation         | CopyKAT: KS-driven MCMC. SCEVAN: greedy VegaMC. inferCNV: 6-state HMM + JAGS Bayesian.            | PELT (`ruptures`, L2 cost) — non-parametric changepoint detection with log-scaled penalty            |
 | Smoothing            | CopyKAT: order-1 Kalman (dlm). inferCNV: pyramidinal MA, window=101.                              | Plain moving average (`scipy.ndimage.uniform_filter1d`) — Kalman complexity buys no measurable accuracy and is hard to vectorize |
 | GENCODE reference    | inferCNV: v27 (2017). CopyKAT: vendored ~v22 vintage.                                             | v49 (2025) — current symbols, ~21k more entries                                                      |
@@ -56,7 +56,7 @@ Same lane as CopyKAT, SCEVAN, inferCNV, CONICSmat:
 
 | Tool          | Input         | Allele-aware | Needs normal ref?            | Subclones                | Runtime (~10k cells) | RAM (~10k cells) | Install friction |
 |--------------|---------------|--------------|------------------------------|--------------------------|----------------------|------------------|------------------|
-| **kopya** | matrix    | No           | No (signature/variance cascade) | Yes (Leiden)             | ~5–7 min             | ~32 GB           | Low (one pip)    |
+| **kopya** | matrix    | No           | No (signature/variance cascade) | Yes (Leiden)             | ~12 s                | ~1.8 GB          | Low (one pip)    |
 | CopyKAT      | matrix        | No           | No (auto baseline)           | Ward dendrogram          | ~1–2 h               | 30–60 GB         | Medium (GitHub install) |
 | SCEVAN       | matrix        | No           | No (signature library)       | Yes, native + tree       | ~30–60 min           | 30–60 GB         | Medium (GitHub two-step) |
 | CONICSmat    | matrix + BED  | No           | No (GMM)                     | From binarized matrix    | minutes–hour         | low              | Low (R + biomaRt) |
