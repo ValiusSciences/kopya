@@ -2,7 +2,7 @@
 
 The direct path (``center_against_baseline`` → ``smooth_along_chromosomes``)
 densifies the whole ``(n_cells × n_genes)`` matrix, so peak memory scales with
-cell count and large cohorts need tens of GB (see issue #24). This module
+cell count and large cohorts need tens of GB. This module
 produces byte-for-byte-equivalent segments + per-cell CN while never holding
 more than one cell-block of the dense matrix at a time:
 

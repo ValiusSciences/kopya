@@ -5,9 +5,10 @@ Known genomic features of GBM tumors in this cohort:
     - chr7 broad gain (EGFR amplification at 7p11.2 is textbook GBM)
     - chr10 broad loss (PTEN deletion at 10q23 is a hallmark GBM event)
 
-The dataset is a mixed tumor + non-malignant (oligodendrocytes, microglia,
-endothelial, astrocytes) sample. The pipeline should identify the malignant
-glioma cells as tumor and show the expected chr7/chr10 profile.
+The GBM_data_matrix fixture is 100% malignant — tumor single cells plus
+gliomasphere lines, with zero non-malignant cells. Because there is no
+in-fixture diploid reference to contrast against, the hallmark chr7/chr10
+tests are xfail (see their reasons below).
 
 Requires: DATA_ROOT/gse57872/patel_gbm.h5ad (skip if absent).
 """

@@ -8,7 +8,6 @@ Dataset layout under DATA_ROOT:
     gse57872/patel_gbm.h5ad          — Patel 2014 GBM (GSE57872)
     gse148673/dcis1.h5ad             — DCIS1 dataset (GSE148673)
     scevan-synthetic/h5ad/*.h5ad     — SCEVAN synthetic matrices
-    hcc1395/*.h5ad                   — HCC1395 breast cancer cell line
     ovarian-scffpe/                  — 10X 17k ovarian scFFPE (HGSOC)
         17k_Ovarian_Cancer_scFFPE_count_filtered_feature_bc_matrix.h5
         FLEX_Ovarian_Barcode_Cluster_Annotation.csv
@@ -119,31 +118,6 @@ def ovarian_scffpe_data():
             "(URLs in tests/external/GOLD_STANDARD_TESTING.md)."
         )
     return h5_path, annotation_path
-
-
-@pytest.fixture(scope="session")
-def hcc1395_h5ad():
-    """Path to the HCC1395 AnnData file.
-
-    Scans DATA_ROOT/hcc1395/ for the first .h5ad present. Skips if none
-    found.
-
-    Returns:
-        Path to the first .h5ad under DATA_ROOT/hcc1395/.
-    """
-    hcc_dir = DATA_ROOT / "hcc1395"
-    if not hcc_dir.is_dir():
-        pytest.skip(
-            f"HCC1395 directory not found at {hcc_dir}; "
-            "download the HCC1395 dataset and convert to h5ad to run these tests."
-        )
-    candidates = sorted(hcc_dir.glob("*.h5ad"))
-    if not candidates:
-        pytest.skip(
-            f"No .h5ad files found under {hcc_dir}; "
-            "download the HCC1395 dataset and convert to h5ad to run these tests."
-        )
-    return candidates[0]
 
 
 @pytest.fixture(scope="session")

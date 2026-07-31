@@ -22,14 +22,14 @@ Both center position-ordered expression against a normal reference and smooth al
 
 | Layer | infercnvpy | kopya |
 |---|---|---|
-| Baseline / normal pool | You label normals (`reference_cat`), or it averages all cells (which silently inverts on high-purity or mesenchymal samples) | Automatic 4-mode cascade (supervised, then UCell signatures, then variance cluster, then GMM fallback) that finds the diploid pool |
+| Baseline / normal pool | You label normals (`reference_cat`), or it averages all cells (which can invert on high-purity or mesenchymal samples) | Automatic 4-mode cascade (supervised, then UCell signatures, then variance cluster, then GMM fallback) that finds the diploid pool |
 | CNV representation | Fixed-resolution smoothed matrix (window/step); no boundaries, no discrete states | PELT changepoint segmentation into discrete, variable-length segments (one shared cohort table) |
 | Tumor/normal call | None native: `cnv_score` is mean-absolute CNV per Leiden cluster and you assign the clusters to tumor/normal, or `tl.copykat` wraps R CopyKAT | Native 2-component GMM on the L1 aneuploidy score, with an explicit `uncertain` band, a Tukey outlier fence, and coherence + low-complexity QC gates |
 | Subclones | Generic scanpy Leiden on all cells | Leiden on tumor-only segment CN, resolution sweep, capped at `max_subclones` |
 | Outputs | `X_cnv` matrix on the AnnData | CopyKAT-drop-in `prediction.csv` / `chr_cnv_matrix.csv`, IGV `.seg`, per-segment parquet, `qc.json` |
 | Gene hygiene | You prepare `.var` positions | GENCODE projection plus drops chrY / MT / HLA / cell-cycle / immunoglobulin genes |
 
-The three that matter most: kopya **segments** the signal (it finds where copy number changes, which is what enables IGV `.seg`, focal boundaries, and CopyKAT-style output) where infercnvpy blurs at a fixed resolution; kopya **finds the baseline automatically** where infercnvpy needs labeled normals or inverts on high-purity and mesenchymal samples; and kopya **makes the call** with false-positive controls where infercnvpy stops at a matrix and wraps R CopyKAT for the actual calling.
+The three that matter most: kopya **segments** the signal (it finds where copy number changes, which is what enables IGV `.seg`, focal boundaries, and CopyKAT-style output) where infercnvpy smooths at a fixed resolution; kopya **finds the baseline automatically** via the signature/variance cascade where infercnvpy relies on labeled normals or an all-cell average (both tools can still invert on high-purity or mesenchymal samples run unsupervised, but kopya reports it via `baseline_method` / `n_normal_seed` and makes supervised the top cascade tier); and kopya **makes the call** with false-positive controls where infercnvpy stops at a matrix and wraps R CopyKAT for the actual calling.
 
 ### Where infercnvpy is equal or ahead
 
@@ -49,7 +49,7 @@ Both tools run their full standard workflow: kopya's `run`, and infercnvpy's `in
 | 50,000 | 26 s | 61 s | 6 s | 52 s |
 | 100,000 | 46 s | 167 s | 15 s | 149 s |
 
-infercnvpy's CNV inference is fast at every size; its end-to-end time is dominated by the generic PCA + Leiden clustering required to turn the matrix into tumor calls, which scales super-linearly. kopya folds calling into the pipeline and stays near-linear, so it pulls ahead from roughly 10k cells upward. (One operational note: infercnvpy's default multiprocessing failed on macOS + Python 3.13 and needed the `fork` start method to run at all.)
+infercnvpy's CNV inference is fast at every size; its end-to-end time is dominated by the generic PCA + Leiden clustering required to turn the matrix into tumor calls, which scales super-linearly. kopya folds calling into the pipeline and stays near-linear, so it pulls ahead from roughly 10k cells upward. (Benchmark note: we set the multiprocessing start method to `fork` so infercnvpy matched the Linux default the run assumes.)
 
 ## What we share with the matrix-only callers
 
@@ -91,7 +91,7 @@ Same lane as CopyKAT, SCEVAN, inferCNV / infercnvpy, CONICSmat:
 |----------------------------------------------------|-------------------------|--------------------------------------------------------------------------------------|
 | Allele-aware (LOH, copy-neutral, biallelic amp/del) | Numbat                  | Needs BAM ingest + Eagle2 + 10 GB phasing panel; entirely different scope            |
 | BAF-based calling                                   | CaSpER, Numbat          | Same; CaSpER also requires BAM ingest                                               |
-| Per-segment Bayesian posteriors                     | inferCNV (HMM + JAGS)   | Our PELT segments + GMM confidence are inspectable and don't need 8-24 h of JAGS sampling |
+| Per-segment Bayesian posteriors                     | inferCNV (HMM + JAGS)   | Our PELT segments + GMM confidence give a lighter-weight confidence signal without a separate JAGS sampling step |
 | Mouse                                               | most tools support it   | v1 hg38 only; mouse is a GENCODE-table swap when needed                              |
 | Multi-sample integration                            | SCEVAN's `multiSampleComparisonClonalCN()` | Per-sample only in v1                                                          |
 

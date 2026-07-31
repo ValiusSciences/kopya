@@ -469,7 +469,7 @@ def run(
     # M3 runs row-blocked so peak memory is bounded by one cell-block of the
     # dense matrix, not the full (n_cells × n_genes) — this is what lets large
     # cohorts (100Ks–~1M cells) run without the dense matrix blowing out RAM
-    # (issue #24). Numerically equivalent to the direct
+    # Numerically equivalent to the direct
     # center→smooth→segment→per-cell-CN path. --block-size <= 0 auto-sizes each
     # block to ~1.5 GB of dense float32. Resolve here (any non-positive value →
     # auto) and pass the resolved value on, so the echo and qc.json record the
@@ -515,7 +515,7 @@ def run(
     # right format for a wide DataFrame; npz for the dense CN matrix.
     segments_path = out_path / "segments.parquet"
     # Persist genomic coordinates alongside the gene-axis indices so segments.parquet
-    # is a self-contained segment → chromosome-location mapping (issue #15). Row i
+    # is a self-contained segment-to-chromosome-location mapping. Row i
     # still corresponds to column i of cn_per_segment.npz.
     segments_out = segments_with_coordinates(segments, adata_m1.var)
     segments_out.to_parquet(segments_path)

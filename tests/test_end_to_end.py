@@ -136,7 +136,7 @@ def test_tumor_normal_recall(pipeline_outputs):
 
 
 def test_diploid_normals_center_on_one(pipeline_outputs):
-    """Issue #9 contract: planted-normal cells sit at ~1.0 on every chromosome.
+    """Contract: planted-normal cells sit at ~1.0 on every chromosome.
 
     With the per-segment diploid reference subtracted (as the CLI does), the
     chr_cnv_matrix honors "1.0 = diploid": normal cells' per-chromosome median

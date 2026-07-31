@@ -148,7 +148,7 @@ def test_per_cell_segment_cn_shape():
 
 
 # =============================================================================
-# Issue #9 — centering pedestal / absolute-output interpretability
+# Centering pedestal / absolute-output interpretability
 # =============================================================================
 
 
@@ -162,11 +162,11 @@ def _pedestal_adata(
     expr=1.2,
     loss_frac=0.35,
 ):
-    """Zero-inflated synthetic that reproduces the issue-#9 centering pedestal.
+    """Zero-inflated synthetic that reproduces the centering pedestal.
 
     Unlike ``test_smooth._three_chr_adata`` (dense ~1.0 baseline, no zero
     inflation), here every gene is detected in only ``detect_p`` of cells and is
-    exactly 0 elsewhere. That is the regime the issue describes: a gene detected
+    exactly 0 elsewhere. That is the pedestal regime: a gene detected
     in <=50% of normals has a per-gene normal median of 0, so
     ``center_against_baseline`` leaves it uncentered and stamps a positive log
     pedestal on every cell. Tumor cells additionally carry a broad LOSS on
@@ -225,7 +225,7 @@ def test_pedestal_present_in_raw_cn():
     """Sanity: the zero-inflated synthetic really does carry a positive pedestal.
 
     The raw per-cell CN of the normal pool medians well above 0 per segment —
-    the constant additive offset issue #9 describes. This guards the fix tests
+    the constant additive offset described above. This guards the fix tests
     below: if the fixture ever stopped producing a pedestal they would pass
     vacuously.
     """
@@ -244,7 +244,7 @@ def test_pedestal_present_in_raw_cn():
 def test_tumor_mean_is_centered_diploid_zero_loss_negative():
     """detect_segments centers tumor_mean: diploid ~0, a planted loss clearly < 0.
 
-    This is the core issue-#9 contract for segments.parquet. Before the fix the
+    This is the core contract for segments.parquet. Before the fix the
     pedestal made every segment's tumor_mean positive, even on the lost
     chromosome; after it, diploid segments sit near 0 and the loss is negative.
     """

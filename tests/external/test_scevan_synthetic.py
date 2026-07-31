@@ -183,10 +183,6 @@ def test_scevan_synthetic_tumor_recall(scevan_h5ad_list, tmp_path):
     # the primary acceptance criterion; per-matrix floor is diagnostic.
     if bad_matrices:
         bad_detail = "; ".join(f"{name}={r:.2f}" for name, r in bad_matrices)
-        pytest.warns(
-            UserWarning,
-            match=r".*",
-        ) if False else None  # structured as informational note in output
         # Use a soft message via the assertion rather than a hard fail here.
         # The mean gate above already enforces aggregate performance.
         print(

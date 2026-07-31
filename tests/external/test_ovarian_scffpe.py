@@ -16,13 +16,13 @@ The pipeline is run fully UNSUPERVISED (signature baseline; no cell-type
 labels are passed in). The published annotations are joined afterwards purely
 to score the calls.
 
-Acceptance criteria (baseline measured in issue #13; margins are comfortable):
+Acceptance criteria (baseline measured during development; margins are comfortable):
     - malignant vs immune/stromal separation AUC >= 0.85  (measured 0.893)
     - immune/stromal false-tumor rate <= 5%               (measured 2.0%)
     - recall on the main tumor states                     (measured 0.80)
       (Tumor / Proliferative / VEGFA+ / Inflammatory) >= 0.70
 
-Documented, but NOT gated on (see issue #13):
+Documented, but NOT gated on:
     - same-lineage floor: normal Ciliated Epithelial Cells are partly called
       tumor because they share the malignant epithelial lineage;
     - two low-signal malignant states (MT-High Jun+/Fos+, Malignant Cells
@@ -76,7 +76,7 @@ IMMUNE_STROMAL_STATES = {
     "Pericytes",
 }
 
-# Acceptance thresholds (issue #13).
+# Acceptance thresholds.
 MIN_MALIGNANT_VS_IMMUNE_STROMAL_AUC = 0.85
 MAX_IMMUNE_STROMAL_FALSE_TUMOR_RATE = 0.05
 MIN_MAIN_TUMOR_RECALL = 0.70
@@ -89,7 +89,7 @@ def ovarian_pipeline(ovarian_scffpe_data, tmp_path_factory):
     Loads the filtered matrix through the package's CellRanger-H5 loader
     (kopya.io.load_counts), runs the full M1->M4 pipeline unsupervised
     with the low-complexity gate active (mirroring the ``kopya run``
-    CLI that produced the issue baseline), then inner-joins the published
+    CLI that produced the development baseline), then inner-joins the published
     per-barcode annotations onto the predictions (scoring only cells present
     in both the predictions and the annotation CSV).
 

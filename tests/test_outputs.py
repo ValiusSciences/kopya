@@ -23,7 +23,7 @@ from kopya.smooth import (
     smooth_along_chromosomes,
 )
 
-# Reuse the issue-#9 zero-inflated pedestal fixture (see test_segment).
+# Reuse the zero-inflated pedestal fixture (see test_segment).
 from tests.test_segment import _pedestal_adata
 
 
@@ -243,7 +243,7 @@ def test_write_clones_seg_igv_format(tmp_path):
 
 
 def _pedestal_pipeline_state(seed=0):
-    """Full M3 state on the issue-#9 zero-inflated pedestal synthetic.
+    """Full M3 state on the zero-inflated pedestal synthetic.
 
     Returns everything the absolute-output writers consume plus the per-segment
     diploid reference the CLI threads into them:
@@ -278,7 +278,7 @@ def _pedestal_pipeline_state(seed=0):
 
 
 def test_chr_cnv_matrix_diploid_centers_on_one_with_baseline():
-    """Issue #9: with the diploid pedestal subtracted, normal cells center on 1.0.
+    """With the diploid pedestal subtracted, normal cells center on 1.0.
 
     The CLI passes a SCALAR pedestal (median of the per-segment reference) here to
     keep the bulk-validated per-chromosome shape intact; this test mirrors that.
@@ -331,7 +331,7 @@ def test_chr_cnv_matrix_scalar_pedestal_preserves_tumor_shape():
 
 
 def test_clones_seg_centered_on_zero_with_baseline(tmp_path):
-    """Issue #9: with the baseline, .seg seg.mean is a log ratio centered on 0.
+    """With the baseline, .seg seg.mean is a log ratio centered on 0.
 
     Diploid segments read ~0 and the planted loss reads clearly negative — the
     "seg.mean centered on 0" the .seg header promises. Without the baseline the

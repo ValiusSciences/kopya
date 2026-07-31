@@ -8,8 +8,9 @@ Two public functions:
                                 signal track that segmentation consumes.
 
 Memory: the centered + smoothed matrix is dense float32 of shape
-(n_cells × n_genes). At 10k cells × 20k genes that's ~800 MB. For larger
-cohorts we will chunk along the cell axis (TODO); v1 keeps it simple.
+(n_cells × n_genes). At 10k cells × 20k genes that's ~800 MB. For very large
+cohorts the CLI's blocked path (``blocked.py``) streams along the cell axis
+to bound peak memory; this in-memory path keeps it simple.
 """
 
 from numpy import asarray, empty_like, float32, median

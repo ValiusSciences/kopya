@@ -85,20 +85,6 @@ classifier: the answer is known at single-cell resolution.
 Ground-truth source: SCEVAN package metadata; positional convention (first 50%
 = normal, second 50% = tumor) as fallback.
 
-#### HCC1395 (known-alteration direction recall)
-
-HCC1395 is a widely-used breast cancer cell-line benchmark for CNV callers.
-Public scRNA-seq data for HCC1395 (available via ENCODE, 10X Genomics, or
-lab-generated datasets) is used to verify that known large-scale alterations
-(chr8 gain, chr17 gain) are recovered in the correct direction.
-
-The test checks direction recall on the HCC1395 cell line: at least one
-major gain must be called correctly.  The exact accession used depends on what
-is present under `DATA_ROOT/hcc1395/`.
-
-Ground-truth source: published FISH and array CGH characterisations of the
-HCC1395 cell line (Griffith et al., *Nature Methods* 2015, PMID 26098051).
-
 #### 10X 17k ovarian scFFPE (HGSOC)
 
 10X Genomics Flex demonstration dataset, "17k Ovarian Cancer scFFPE": a
@@ -124,7 +110,7 @@ calls against the published annotations on three metrics: malignant-vs-immune/
 stromal AUC, immune/stromal false-tumor rate, and recall on the main tumor
 states.
 
-Documented but **not** gated on (see issue #13):
+Documented but **not** gated on (characterized during development):
 - **Same-lineage floor**: normal Ciliated Epithelial Cells are partly called
   tumor (~48%) because they share the malignant epithelial lineage; Fallopian
   Tube epithelium stays clean (~1%).
@@ -274,35 +260,7 @@ Writes h5ad files to:
 
 Expected: 10-30 h5ad files, each ~200-800 cells × ~15,000-20,000 genes.
 
-### 2.4 HCC1395 (known-alteration direction recall)
-
-**Source:** Multiple options: any scRNA-seq h5ad with the HCC1395 cell line.
-Recommended public source: 10X Genomics public datasets or ENCODE project.
-
-A convenient route is the NCI GDC/ENCODE 10X chromium dataset:
-
-```bash
-mkdir -p $KOPYA_TEST_DATA/hcc1395
-
-# Option A: download from 10X Genomics (if a public dataset is available for HCC1395):
-# curl -L -o $KOPYA_TEST_DATA/hcc1395/hcc1395_raw.h5 \
-#   "https://cf.10xgenomics.com/samples/.../filtered_feature_bc_matrix.h5"
-
-# Option B: convert from your lab's sequencing run of the HCC1395 cell line
-# using the standard 10x CellRanger output:
-conda run -n kopya python - <<'EOF'
-import os, scanpy as sc
-adata = sc.read_10x_h5("path/to/filtered_feature_bc_matrix.h5")
-adata.var_names_make_unique()
-sc.pp.normalize_total(adata, target_sum=1e4)
-sc.pp.log1p(adata)
-adata.write_h5ad(os.path.join(os.environ["KOPYA_TEST_DATA"], "hcc1395", "hcc1395.h5ad"))
-EOF
-```
-
-**Expected size:** Depends on capture depth; typically 1,000-8,000 cells × ~30,000 genes.
-
-### 2.5 10X 17k ovarian scFFPE (HGSOC)
+### 2.4 10X 17k ovarian scFFPE (HGSOC)
 
 **Source:** 10X Genomics public Flex datasets: "17k Ovarian Cancer scFFPE".
 **Files:** the filtered feature-barcode matrix (`.h5`) plus the published
@@ -329,7 +287,7 @@ and a `Cell Annotation` column; barcodes match the matrix directly.
 No conversion is needed; the test reads the `.h5` through
 `kopya.io.load_counts(cellranger_h5=...)`.
 
-### 2.6 Maynard 2020 lung (maynard2020_3k, the infercnvpy tutorial dataset)
+### 2.5 Maynard 2020 lung (maynard2020_3k, the infercnvpy tutorial dataset)
 
 The 3k-cell SMART-seq2 lung-adenocarcinoma subset used by the infercnvpy
 tutorial. It ships bundled with `infercnvpy`, so acquisition goes through its
@@ -352,7 +310,7 @@ tutorial feeds to inferCNV, keeping the head-to-head fair.
 
 **Expected size:** built h5ad ~40 MB.
 
-### 2.7 UCSF osteosarcoma T1 (IPISRC044_T1)
+### 2.6 UCSF osteosarcoma T1 (IPISRC044_T1)
 
 A DNA-truthed **mesenchymal** tumor (UCSF, osteosarc.com). Unlike the other
 datasets it is run **supervised**: the tumor's fibroblast/osteoblast program
@@ -438,7 +396,6 @@ Once data is downloaded and converted, runtime depends on the dataset size:
 | Patel GBM            | ~500       | 1-3 min         |
 | DCIS1                | ~1,500     | 2-5 min         |
 | SCEVAN synthetic x10 | ~500 each  | 5-15 min total  |
-| HCC1395              | ~2,000-8k  | 3-8 min         |
 | 10X ovarian scFFPE   | ~17,000    | 1-3 min         |
 
 ## Section 4: Acceptance Criteria
@@ -446,6 +403,9 @@ Once data is downloaded and converted, runtime depends on the dataset size:
 The following table defines what "passing" means for each dataset and metric.
 Thresholds were set based on published performance figures for comparable tools
 (CopyKAT, inferCNV, SCEVAN) and biological knowledge of the expected signals.
+In practice these targets function as regression gates set with margin below the
+observed values (for example ovarian AUC 0.85 vs measured 0.893, osteosarcoma
+Pearson 0.80 vs measured 0.877), not as independent a-priori acceptance bars.
 
 | Dataset         | Metric                              | Target   | Rationale                                                                                                              |
 |-----------------|-------------------------------------|----------|------------------------------------------------------------------------------------------------------------------------|
@@ -461,8 +421,6 @@ Thresholds were set based on published performance figures for comparable tools
 | SCEVAN synth.   | Mean tumor recall across 10 matrices | >= 0.70 | SCEVAN itself reports 0.85+ on its own synthetic data; 0.70 accounts for platform differences                          |
 | SCEVAN synth.   | Per-matrix tumor recall floor       | >= 0.50  | No single matrix should be catastrophically wrong; soft floor (reported but not hard-failed)                           |
 | SCEVAN synth.   | Mean normal recall across 10 matrices | >= 0.60 | Ensures the classifier does not inflate tumor recall by labelling everything tumor                                     |
-| HCC1395         | Pipeline completes without error    | Required | Basic end-to-end smoke test                                                                                            |
-| HCC1395         | Known-alteration direction recall   | >= 0.50  | At least one of the known gains/losses must be called in the correct direction                                          |
 | Ovarian scFFPE  | Pipeline completes without error    | Required | Basic end-to-end smoke test; ≥ 10k barcodes must join the annotation CSV                                               |
 | Ovarian scFFPE  | Malignant vs immune/stromal AUC     | >= 0.85  | `tumor_score` must rank malignant cells above immune/stromal cells (measured 0.893)                                    |
 | Ovarian scFFPE  | Immune/stromal false-tumor rate     | <= 5%    | Immune + stromal cells must rarely be called tumor (measured 2.0%)                                                     |
@@ -522,9 +480,15 @@ Reference run: `pytest tests/external/ -v` yields
 |---|---|---|---|
 | Pipeline completes without error | Yes | required | **PASS** |
 | Tumor cells detected | Yes (>0) | > 0 | **PASS** |
-| Pearson r sc pseudobulk vs bulk WGS (full panel) | within expected range | ≥ 0.40 | **PASS** |
+| Pearson r sc pseudobulk vs bulk WGS (full panel) | meets threshold (coarse, arm-level) | ≥ 0.40 | **PASS** |
 | chr8 tumor mean > normal mean (directional) | Yes | directional | **PASS** |
 | All outputs written | Yes | required | **PASS** |
+
+Note: the DCIS1 bulk-WGS truth (`DCIS1_BULK_WGS_LOG2R`) is digitized at
+chromosome-arm resolution from a published figure (Gao et al. 2021, Fig. 1),
+with most chromosomes set to a constant value. The Pearson r is therefore a
+coarse, arm-level concordance check rather than a fine per-gene comparison,
+which is why the acceptance threshold is a modest r >= 0.40 (see §6.2).
 
 ### 5.3 SCEVAN synthetic (Zenodo 6628423, 10 matrices)
 
@@ -535,17 +499,9 @@ Reference run: `pytest tests/external/ -v` yields
 | h5ad conversion (20/20 matrices) | 100% | required | **PASS** |
 | Mean tumor recall across 10 matrices (first 10 of the 20) | ≥ 0.70 (measured) | ≥ 0.70 | **PASS** |
 | Mean normal recall across 10 matrices | ≥ 0.60 (measured) | ≥ 0.60 | **PASS** |
-| No per-matrix recall < 0.50 | Yes | soft floor | **PASS** |
+| No per-matrix recall < 0.50 | Yes | soft floor | **diagnostic** (reported, not gated) |
 
-### 5.4 HCC1395
-
-No scRNA-seq data downloaded to this machine (Section 2.4 provides acquisition instructions).
-
-| Metric | Value | Target | Status |
-|---|---|---|---|
-| All HCC1395 tests | n/a | n/a | **SKIP** (data absent) |
-
-### 5.5 10X ovarian scFFPE (HGSOC)
+### 5.4 10X ovarian scFFPE (HGSOC)
 
 16,956 cells × 8,577 genes (after M1 filtering) · baseline: `signature` ·
 138 segments · run fully unsupervised · 16,569 barcodes join the annotation CSV.
@@ -580,9 +536,9 @@ Per-state tumor-call rate (context; not gated per-state):
 
 Overall malignant recall (all six states) is 71.5%; the two low-signal states
 pull it below the main-state figure, which is why the gate is on the main
-states (see Section 1 and issue #13).
+states (see Section 1).
 
-### 5.6 Maynard 2020 lung (maynard2020_3k)
+### 5.5 Maynard 2020 lung (maynard2020_3k)
 
 3,000 cells × 12,410 genes (after M1) · baseline: `supervised` (immune reference)
 · 170 segments · malignant set = the 522 annotated `Epithelial cell`s.
@@ -609,7 +565,7 @@ Notes:
 - **kopya additionally classifies** (324/522 Epithelial as tumor, the rest normal
   lung epithelium); inferCNV only renders the heatmap.
 
-### 5.7 UCSF osteosarcoma T1 (IPISRC044_T1)
+### 5.6 UCSF osteosarcoma T1 (IPISRC044_T1)
 
 4,452 cells × 11,191 genes (after M1, autosome-only) · baseline: `supervised`
 (3,514 annotated non-tumor cells) · 146 segments · scored vs matched bulk exome.
@@ -648,16 +604,16 @@ Read-out:
 - **The osteosarcoma only works supervised.** Unsupervised it inverts to ~7
   tumor cells: the osteosarcoma is mesenchymal and scores high on the *normal*
   Fibroblast (+1.63) and Osteoblast (+1.28) signatures, so the tumor seeds the
-  diploid baseline and the reference frame collapses (§6.6).
+  diploid baseline and the reference frame collapses (§6.5).
 - **A `Neutrophil` signature was added** (`normal_signatures.json` v3): the
   osteosarcoma's largest normal class (995 cells, ~84% previously "uncertain") is
   now recognized (score +1.1; tumor scores −0.5, so it is not mis-seeded). It is a
   genuine library gain and regresses nothing (ovarian/DCIS1/SCEVAN unchanged),
-  but it does **not** fix the inversion; that is a same-lineage problem (§6.6),
+  but it does **not** fix the inversion; that is a same-lineage problem (§6.5),
   not a missing-class one; adding clean normals cannot remove the tumor cells the
   Fibroblast/Osteoblast signatures already pull into the seed.
 
-### 5.8 Full suite summary
+### 5.7 Full suite summary
 
 ```
 # unit suite only (tests/, no external datasets mounted)
@@ -766,20 +722,7 @@ a necessary but not sufficient condition for clinical-grade performance.  Real
 samples with low purity (<30% tumor), highly heterogeneous subclone structures,
 or unusual transcriptional programs may fall below the synthetic benchmark.
 
-### 6.4 HCC1395 single-clone caveat
-
-HCC1395 is a clonal cell line, not a primary tumour sample.  This means:
-
-- The "normal" reference must come from a different sample or from the
-  conftest fixture baseline (no authentic normals present within the sample).
-- The pipeline's baseline picker will attempt to identify normal-like cells
-  from signature matching; if few or no cells score high for normal signatures,
-  the pipeline falls back to the bottom-variance-quartile heuristic.
-- Cell lines also tend to show more extreme CNV states (homozygous deletions,
-  high-level amplifications) than primary tumours, which can saturate the
-  1.0-centered scale at the extremes.
-
-### 6.5 GEO data availability
+### 6.4 GEO data availability
 
 NCBI GEO occasionally reorganises supplementary file paths.  The download URLs
 in Section 2 were correct as of the date this document was written (2026-05-30).
@@ -790,7 +733,7 @@ ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE57nnn/GSE57872/suppl/
 ftp://ftp.ncbi.nlm.nih.gov/geo/series/GSE148nnn/GSE148673/suppl/
 ```
 
-### 6.6 Mesenchymal same-lineage baseline inversion (why the osteosarcoma runs supervised)
+### 6.5 Mesenchymal same-lineage baseline inversion (why the osteosarcoma runs supervised)
 
 **Observed:** on the UCSF osteosarcoma T1, the unsupervised cascade calls only
 ~7 cells tumor (919/938 annotated tumor cells are called *normal*). The

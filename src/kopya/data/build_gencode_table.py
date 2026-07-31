@@ -61,7 +61,7 @@ def _iter_gene_rows(gtf_path):
         - gene must have a non-empty gene_name attribute (skip unannotated)
 
     Args:
-        gtf_path: Path to gencode.v27.annotation.gtf.gz.
+        gtf_path: Path to gencode.v49.annotation.gtf.gz.
 
     Yields:
         Tuples of (gene_symbol: str, chr: str, start: int, end: int).
@@ -130,7 +130,7 @@ def build(gtf_path, out_path):
     4-column TSV.
 
     Args:
-        gtf_path: Path to gencode.v27.annotation.gtf.gz.
+        gtf_path: Path to gencode.v49.annotation.gtf.gz.
         out_path: Path to the output TSV (parent dir must exist).
     """
     # Collect rows into a per-symbol dict to handle the PAR-region duplicates;
@@ -164,7 +164,7 @@ def build(gtf_path, out_path):
 def main():
     """CLI entry point: parse args and dispatch to build()."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--gtf", required=True, help="Path to gencode.v27.annotation.gtf.gz")
+    parser.add_argument("--gtf", required=True, help="Path to gencode.v49.annotation.gtf.gz")
     parser.add_argument("--out", required=True, help="Output TSV path")
     args = parser.parse_args()
 

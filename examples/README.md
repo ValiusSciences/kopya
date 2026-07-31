@@ -22,9 +22,10 @@ what the numbers mean. The tumor population reads chr7 ≈ 1.8 and chr10 ≈ 0.3
 
 > **Note on `qc.json`'s `baseline_method: gmm_fallback`.** This synthetic fixture
 > has no immune/stromal expression signatures for the baseline cascade to lock
-> onto, so it correctly falls through to the GMM fallback tier. The calls are
-> still exact (300 tumor / 200 normal); on real immune-infiltrated tumors the
-> cascade normally settles on the higher `signature` or `variance` tier.
+> onto, so it correctly falls through to the GMM fallback tier. On this fixture it
+> still recovers the planted 300 tumor / 200 normal split exactly; on real
+> immune-infiltrated tumors the cascade normally settles on the higher `signature`
+> or `variance` tier.
 
 ### Files
 
@@ -59,5 +60,6 @@ kopya plot-heatmap \
 ```
 
 `qc.json` records per-step wall-clock timings and the package version, so those
-fields will differ slightly on each regeneration; the analysis outputs are
-deterministic.
+fields will differ slightly on each regeneration. The analysis outputs are
+deterministic for a given environment (seeds are pinned); minor floating-point
+variation is possible across platforms or thread counts.

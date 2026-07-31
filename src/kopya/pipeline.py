@@ -10,7 +10,7 @@ results **without writing any files**. It is the single orchestration shared by:
 
 so the same code path the API exposes is the one the gold-standard suite
 validates. The ``kopya run`` CLI keeps its own memory-lean, block-
-streaming path for very large cohorts (issue #24); ``run_pipeline`` is the
+streaming path for very large cohorts; ``run_pipeline`` is the
 straightforward in-memory equivalent (numerically equivalent on the datasets we
 validate).
 """

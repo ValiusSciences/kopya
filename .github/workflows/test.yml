@@ -16,6 +16,10 @@ on:
   # bug needs re-running without a code push.
   workflow_dispatch:
 
+# Least-privilege default: the suite only needs to read the repo contents.
+permissions:
+  contents: read
+
 # Cancel in-progress runs on the same ref when a new commit lands; saves CI
 # minutes on rapid pushes (common during a PR review cycle).
 concurrency:

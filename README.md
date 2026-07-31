@@ -24,7 +24,7 @@ The algorithm is not novel; it is a careful synthesis of the best ideas from the
 | 2-component GMM on L1 deviation from baseline, giving tumor / normal | CopyKAT |
 | Per-segment CN matrix, Leiden-clustered into subclones | SCEVAN |
 
-Our contribution is twofold. First, **an end-to-end automated caller**: kopya finds the diploid baseline, segments the genome into discrete CNV regions, and calls tumor / normal / uncertain with QC gates, rather than handing you a signal matrix to interpret yourself. Second, **the engineering**: a single sparse-first Python package that runs the same ideas well over 100× faster than the R tools (see the scaling table below), in a fraction of the memory, installs in one step, and produces CopyKAT-compatible output files so an existing CopyKAT-based pipeline needs no changes.
+Our contribution is twofold. First, **an end-to-end automated caller**: kopya finds the diploid baseline, segments the genome into discrete CNV regions, and calls tumor / normal / uncertain with QC gates, rather than handing you a signal matrix to interpret yourself. Second, **the engineering**: a single sparse-first Python package that runs the same ideas roughly ~100× faster than CopyKAT's reported 1-2 h runtime and in a fraction of the memory (kopya does 10k cells in ~12 s at ~1.8 GB; see the scaling table below), installs in one step, and writes CopyKAT-style output files (`prediction.csv`, `chr_cnv_matrix.csv`) that drop into a CopyKAT-based workflow with minimal changes.
 
 ## How it works
 
@@ -32,26 +32,26 @@ Five-step pipeline:
 
 | Step | Module | What it does |
 |------|--------|-------------|
-| 1. Normalize | `normalize.py` | CP10k + log1p; project genes onto GENCODE v49 hg38 coordinates; drop chrY / MT- / HLA- / cell-cycle genes |
+| 1. Normalize | `normalize.py` | CP10k + log1p; project genes onto GENCODE v49 hg38 coordinates; drop chrX / chrY / chrM, `MT-*`, `HLA-*`, immunoglobulin (IGH/IGK/IGL) and cell-cycle genes. Per-chromosome outputs are autosome-only (chr1-22) |
 | 2. Pick baseline | `baseline.py` | 4-mode cascade: **supervised** (barcodes you supply), then **signature** (UCell on bundled immune/stromal/endothelial gene sets, à la SCEVAN), then **variance cluster** (Leiden + lowest-variance cluster, à la CopyKAT), then **GMM fallback** |
 | 3. Smooth + segment | `smooth.py`, `segment.py` | Center each cell against the per-gene normal-pool median; per-chromosome moving average; PELT changepoint detection on the **pooled tumor signal**; per-cell CN computed inside the shared segment table |
 | 4. Classify + subclones | `classify.py` | 2-component GMM on per-cell L1 distance from baseline, giving tumor / normal / uncertain; Leiden on tumor cells' per-segment CN matrix, giving subclones (max 5) |
-| 5. Write outputs | `outputs.py` | Drop-in `prediction.csv`, `chr_cnv_matrix.csv` (CopyKAT-compatible), IGV `.seg`, `qc.json` |
+| 5. Write outputs | `outputs.py` | `prediction.csv`, `chr_cnv_matrix.csv` (CopyKAT-style columns), IGV `.seg`, `qc.json` |
 
-Performance scales near-linearly with cell count. The numbers below are 10 replicate runs per size of the full `kopya run` pipeline end to end (load through outputs), peak resident memory measured via `/usr/bin/time`; reproduce with [`scripts/benchmark_scaling.py`](scripts/benchmark_scaling.py):
+Performance scales near-linearly with cell count. The table below is 10 replicate runs per size of the full `kopya run` pipeline end to end (load through outputs) on an Apple M5 Pro (15 cores, 24 GB RAM, macOS), peak resident memory via `/usr/bin/time`; values are mean ± sd. Absolute times are hardware-dependent; the near-linear scaling is the point. Reproduce with [`scripts/benchmark_scaling.py`](scripts/benchmark_scaling.py):
 
-| Cells | Wall time | Peak RAM |
-|------:|----------:|---------:|
-| 5,000 | 11 s | 1.2 GB |
-| 10,000 | 12 s | 1.8 GB |
-| 25,000 | 16 s | 3.5 GB |
-| 50,000 | 22 s | 4.2 GB |
-| 100,000 | 40 s | 4.6 GB |
-| 200,000 | 70 s | 7.3 GB |
-| 400,000 | 119 s | 11.5 GB |
-| 800,000 | 242 s | 14.9 GB |
+| Cells | Wall time (s) | Peak RAM (GB) |
+|------:|--------------:|--------------:|
+| 5,000 | 10.9 ± 0.3 | 1.17 ± 0.01 |
+| 10,000 | 12.2 ± 0.3 | 1.82 ± 0.01 |
+| 25,000 | 15.8 ± 0.4 | 3.54 ± 0.11 |
+| 50,000 | 22.0 ± 0.7 | 4.22 ± 0.11 |
+| 100,000 | 39.7 ± 0.6 | 4.55 ± 0.07 |
+| 200,000 | 70.1 ± 10.2 | 7.28 ± 0.43 |
+| 400,000 | 119.3 ± 3.8 | 11.52 ± 0.53 |
+| 800,000 | 242.1 ± 4.4 | 14.91 ± 0.57 |
 
-At 10k cells that is ~12 s and ~1.8 GB peak RSS, against CopyKAT's 1-2 h and 30-60 GB (a ~300× speedup in a ~20x smaller footprint), and it keeps going where the R tools do not run at all: ~800k cells finish in about 4 minutes at ~15 GB.
+At 10k cells that is ~12 s and ~1.8 GB peak RSS. CopyKAT's own reports put it at 1-2 h and 30-60 GB on comparable data, so kopya is roughly two orders of magnitude faster in a much smaller footprint. Those R-tool figures are the tools' published/reported numbers, not measured here; the only tool benchmarked head-to-head is infercnvpy (see [`docs/comparison.md`](docs/comparison.md)). kopya also scales to ~800k cells in about 4 minutes at ~15 GB, beyond where the R tools stay practical on commodity hardware.
 
 ## Install
 
@@ -267,8 +267,8 @@ All artifacts land under `--out-dir`:
 
 | File | Shape / Format | Purpose |
 |------|----------------|---------|
-| `prediction.csv` | cells × `{class, confidence, tumor_score, subclone, n_segments_altered, low_complexity}` | Per-cell call. Drop-in replacement for `copykat_prediction.csv`: the CopyKAT-compatible columns keep their positions; `low_complexity` is appended last |
-| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss). Drop-in for `copykat_chr_cnv_matrix.csv` |
+| `prediction.csv` | cells × `{class, confidence, tumor_score, subclone, n_segments_altered, low_complexity}` | Per-cell call, in CopyKAT-style column semantics (a `prediction`/`class` column plus per-cell scores); `low_complexity` is appended last. Aligns with CopyKAT's per-cell prediction table so downstream consumers need little adaptation |
+| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss), in the same cells × chromosomes layout CopyKAT emits |
 | `{sample}_clones.seg` | IGV `.seg` | Per-clone consensus segments, loadable directly into IGV. Clone IDs prefixed with the sample name so multi-sample sessions stay disambiguated |
 | `segments.parquet` | per-segment summary (one row per segment) | The **segment-to-genome map**. Original columns `chr`, `start_idx`/`end_idx` (gene-axis indices, start inclusive/end exclusive), `n_genes`, `tumor_mean` (pooled-tumor log-deviation: `>0` gain, `<0` loss), plus three appended: `segment_id` (0-based key), `start_bp`/`end_bp` (genomic span of the segment, the min gene start and max gene end across its genes). `segment_id`/`start_bp`/`end_bp` make this self-contained: you can locate any segment without the source `adata.var`. Segment row `i` equals column `i` of `cn_per_segment.npz` |
 | `cn_per_segment.npz` | dense (cells × segments) | Per-cell × per-segment CN matrix (`cn`) plus `cell_barcodes`; column `i` corresponds to `segment_id == i` in `segments.parquet`. Stored **raw** (log-space, carries a per-gene pedestal + per-cell offset); re-center before plotting (see [How the signal is recovered](#visualize-the-calls-infercnv-style-heatmap)). Optimized for numpy consumers |
@@ -442,7 +442,7 @@ pytest tests/test_segment.py -v # just segmentation
 pytest tests/test_cli.py -v     # includes CellRanger format tests
 ```
 
-These run on every push and pull request via CI. **If this passes, the implementation is correct on synthetic data.**
+These run on every push and pull request via CI. **If this passes, the pipeline recovers the planted events on the synthetic fixture** (a regression gate, not a proof of correctness).
 
 The CLI tests cover all four input forms end-to-end on the same 500-cell fixture: `--anndata`, `--cellranger-dir`, `--cellranger-h5`, and `--counts/--obs/--var`. The CellRanger fixtures are built programmatically; no 10x Genomics tools required.
 
@@ -461,16 +461,15 @@ We test against publicly available datasets whose CNV ground truth is establishe
 | Dataset | Source | Ground truth | Result |
 |---|---|---|---|
 | Patel 2014 GBM | GSE57872 (SMART-seq2) | Published chr7 gain / chr10 loss | 3 PASS, 4 XFAIL¹ |
-| DCIS1 breast cancer | GSE148673 (CopyKAT paper) | Paired bulk WGS (Gao et al. 2021) | 5 PASS |
+| DCIS1 breast cancer | GSE148673 (CopyKAT paper) | Bulk WGS, digitized from Gao et al. 2021 (arm-level) | 5 PASS |
 | SCEVAN synthetic matrices | Zenodo 6628423 | Planted tumor/normal labels | 3 PASS |
-| 10X ovarian scFFPE (HGSOC) | 10x Genomics 17k dataset | FLEX cluster annotations | 4 PASS |
-| Maynard 2020 lung | `maynard2020_3k` (infercnvpy) | Cell-type labels + kopya-vs-inferCNV | 6 PASS |
+| 10X ovarian scFFPE (HGSOC) | 10x Genomics 17k dataset | FLEX cell-type annotations (expression-derived) | 4 PASS |
+| Maynard 2020 lung | `maynard2020_3k` (infercnvpy) | Cell-type labels (expression-derived) + kopya-vs-inferCNV | 6 PASS |
 | UCSF osteosarcoma T1 | osteosarc.com (IPISRC044_T1) | Matched bulk WES (CNVkit) | 5 PASS |
-| HCC1395 breast cell line | SEQC2 / GIAB karyotype | Known amplifications / losses | SKIP² |
 
 ¹ The Patel SMART-seq2 dataset triggers a known baseline inversion: the unsupervised UCell cascade misfires on full-length read counts, so the four hallmark-direction tests are `xfail(strict)`. Fix path: supervised mode with cell-type annotations. Full diagnosis in [`tests/external/GOLD_STANDARD_TESTING.md §6.1`](tests/external/GOLD_STANDARD_TESTING.md).
 
-² HCC1395 scRNA-seq data not staged locally; tests are ready to run once data is placed at the expected path.
+**What "ground truth" means here.** Matched DNA-level CNV truth exists only for DCIS1 and the osteosarcoma sample (each a single patient; the DCIS1 profile is digitized at chromosome-arm resolution from a published figure). The ovarian and Maynard checks compare kopya's calls against expression-derived cell-type annotations, so they measure agreement between two expression-based classifications, not DNA-level CNV accuracy. No head-to-head *accuracy* comparison against CopyKAT or SCEVAN was run; the only cross-tool check is kopya-vs-inferCNV per-chromosome concordance on Maynard.
 
 **To reproduce:**
 

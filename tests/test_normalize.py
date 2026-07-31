@@ -355,7 +355,7 @@ def test_filter_normalize_project_end_to_end(tiny_adata, tiny_gene_order):
 
 
 # ---------------------------------------------------------------------------
-# Memory-lean M1 rewrite (issue #24): equivalence + immutability guards.
+# Memory-lean M1 rewrite: equivalence + immutability guards.
 # The filter/normalize rewrites must match the prior semantics exactly and
 # never mutate the caller's matrix (the whole point is a memory win, not a
 # behavior change). These are deliberately generous.
