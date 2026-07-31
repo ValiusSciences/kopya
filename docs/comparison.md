@@ -4,7 +4,7 @@ Where kopya sits relative to the existing scRNA-seq CNV callers.
 
 ## One-line summary
 
-> "What you'd get if you took the best ideas from CopyKAT and SCEVAN, dropped the R install pain, kept everything sparse, and shipped opinionated defaults you can validate against the originals."
+> "What you'd get if you took the best ideas from CopyKAT and SCEVAN, ran them in pure Python without the R toolchain, kept everything sparse, and shipped opinionated defaults you can validate against the originals."
 
 Numbat stays as the allele-aware companion. The external gold-standard test suite ([`../tests/external/GOLD_STANDARD_TESTING.md`](../tests/external/GOLD_STANDARD_TESTING.md)) is how kopya is validated against independently-established CNV ground truth.
 
@@ -24,12 +24,12 @@ Both center position-ordered expression against a normal reference and smooth al
 |---|---|---|
 | Baseline / normal pool | You label normals (`reference_cat`), or it averages all cells (which silently inverts on high-purity or mesenchymal samples) | Automatic 4-mode cascade (supervised, then UCell signatures, then variance cluster, then GMM fallback) that finds the diploid pool |
 | CNV representation | Fixed-resolution smoothed matrix (window/step); no boundaries, no discrete states | PELT changepoint segmentation into discrete, variable-length segments (one shared cohort table) |
-| Tumor/normal call | None native: `cnv_score` is mean-absolute CNV per Leiden cluster and you decide by eye, or `tl.copykat` shells out to R CopyKAT | Native 2-component GMM on the L1 aneuploidy score, with an explicit `uncertain` band, a Tukey outlier fence, and coherence + low-complexity QC gates |
+| Tumor/normal call | None native: `cnv_score` is mean-absolute CNV per Leiden cluster and you assign the clusters to tumor/normal, or `tl.copykat` wraps R CopyKAT | Native 2-component GMM on the L1 aneuploidy score, with an explicit `uncertain` band, a Tukey outlier fence, and coherence + low-complexity QC gates |
 | Subclones | Generic scanpy Leiden on all cells | Leiden on tumor-only segment CN, resolution sweep, capped at `max_subclones` |
 | Outputs | `X_cnv` matrix on the AnnData | CopyKAT-drop-in `prediction.csv` / `chr_cnv_matrix.csv`, IGV `.seg`, per-segment parquet, `qc.json` |
 | Gene hygiene | You prepare `.var` positions | GENCODE projection plus drops chrY / MT / HLA / cell-cycle / immunoglobulin genes |
 
-The three that matter most: kopya **segments** the signal (it finds where copy number changes, which is what enables IGV `.seg`, focal boundaries, and CopyKAT-style output) where infercnvpy blurs at a fixed resolution; kopya **finds the baseline automatically** where infercnvpy needs labeled normals or silently inverts on the hard cases; and kopya **makes the call** with false-positive controls where infercnvpy stops at a matrix and, tellingly, hands the actual calling back to R CopyKAT.
+The three that matter most: kopya **segments** the signal (it finds where copy number changes, which is what enables IGV `.seg`, focal boundaries, and CopyKAT-style output) where infercnvpy blurs at a fixed resolution; kopya **finds the baseline automatically** where infercnvpy needs labeled normals or inverts on high-purity and mesenchymal samples; and kopya **makes the call** with false-positive controls where infercnvpy stops at a matrix and wraps R CopyKAT for the actual calling.
 
 ### Where infercnvpy is equal or ahead
 
@@ -75,11 +75,11 @@ Same lane as CopyKAT, SCEVAN, inferCNV / infercnvpy, CONICSmat:
 | Axis                  | Other tools                                                                                       | kopya                                                                                       |
 |----------------------|---------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------|
 | Language             | R (all four matrix-only callers)                                                                  | Python (numpy/scipy/scanpy/sklearn)                                                                  |
-| Install              | bioconda broken (inferCNV), GitHub two-step (SCEVAN), Rgraphviz hell (CaSpER)                     | one pip install, one conda env, no JAGS / no Rgraphviz                                              |
+| Install              | inferCNV needs JAGS; SCEVAN is a two-step GitHub install; CaSpER needs BAFExtract + Rgraphviz     | one pip install, one conda env, no JAGS / no Rgraphviz                                              |
 | Matrix layout        | Densified genes × cells (CopyKAT: 30-60 GB at 10k cells)                                          | Sparse CSR throughout M1+M2; dense only in M3+M4, ~1.8 GB peak at 10k cells vs CopyKAT's 30-60 GB   |
 | Segmentation         | CopyKAT: KS-driven MCMC. SCEVAN: greedy VegaMC. inferCNV: 6-state HMM + JAGS Bayesian.            | PELT (`ruptures`, L2 cost): non-parametric changepoint detection with log-scaled penalty            |
-| Smoothing            | CopyKAT: order-1 Kalman (dlm). inferCNV: pyramidinal MA, window=101.                              | Plain moving average (`scipy.ndimage.uniform_filter1d`); Kalman complexity buys no measurable accuracy and is hard to vectorize |
-| GENCODE reference    | inferCNV: v27 (2017). CopyKAT: vendored ~v22 vintage.                                             | v49 (2025), current symbols, ~21k more entries                                                      |
+| Smoothing            | CopyKAT: order-1 Kalman (dlm). inferCNV: pyramidal MA, window=101.                               | Plain moving average (`scipy.ndimage.uniform_filter1d`); simpler to vectorize, with no accuracy difference we could measure on this signal |
+| GENCODE reference    | inferCNV: v27 (2017). CopyKAT: vendored ~v22.                                                    | v49 (2025), current symbols, ~21k more entries                                                      |
 | Tumor/normal call    | CopyKAT: Ward hclust + 2-way cut. SCEVAN: cluster on segments. inferCNV: needs supplied normals.  | 2-component GMM on L1 distance from normal-pool median, with explicit `uncertain` band               |
 | Supervised override  | CopyKAT supports it; SCEVAN supports it                                                           | Same: `--norm-cell-names` short-circuits the cascade                                               |
 | Subclone discovery   | CopyKAT: cut Ward dendrogram. SCEVAN: re-segment per cluster.                                     | Leiden on per-cell × per-segment CN, with resolution sweep capped at `max_subclones`                |
@@ -90,7 +90,7 @@ Same lane as CopyKAT, SCEVAN, inferCNV / infercnvpy, CONICSmat:
 | Capability                                          | Owned by                | Why we skip                                                                          |
 |----------------------------------------------------|-------------------------|--------------------------------------------------------------------------------------|
 | Allele-aware (LOH, copy-neutral, biallelic amp/del) | Numbat                  | Needs BAM ingest + Eagle2 + 10 GB phasing panel; entirely different scope            |
-| BAF-based calling                                   | CaSpER, Numbat          | Same, and CaSpER is unrealistic without BAM ingest anyway                           |
+| BAF-based calling                                   | CaSpER, Numbat          | Same; CaSpER also requires BAM ingest                                               |
 | Per-segment Bayesian posteriors                     | inferCNV (HMM + JAGS)   | Our PELT segments + GMM confidence are inspectable and don't need 8-24 h of JAGS sampling |
 | Mouse                                               | most tools support it   | v1 hg38 only; mouse is a GENCODE-table swap when needed                              |
 | Multi-sample integration                            | SCEVAN's `multiSampleComparisonClonalCN()` | Per-sample only in v1                                                          |
@@ -104,9 +104,9 @@ Same lane as CopyKAT, SCEVAN, inferCNV / infercnvpy, CONICSmat:
 | CopyKAT      | matrix        | No           | No (auto baseline)           | Ward dendrogram          | ~1-2 h               | 30-60 GB         | Medium (GitHub install) |
 | SCEVAN       | matrix        | No           | No (signature library)       | Yes, native + tree       | ~30-60 min           | 30-60 GB         | Medium (GitHub two-step) |
 | CONICSmat    | matrix + BED  | No           | No (GMM)                     | From binarized matrix    | minutes-hour         | low              | Low (R + biomaRt) |
-| inferCNV     | matrix + annotations + gene-order | No | **Yes (required)**           | Leiden, HMM              | 8-24 h               | 100-250 GB       | High (JAGS, dead upstream, bioconda broken) |
+| inferCNV     | matrix + annotations + gene-order | No | **Yes (required)**           | Leiden, HMM              | 8-24 h               | 100-250 GB       | High (R + JAGS build) |
 | Numbat       | BAM + matrix + 1000G panel | **Yes (haplotype)** | No | Yes, lineage tree       | 1-4 h pileup + 30-90 min | 20-60 GB         | Medium-High (Eagle2 + 10 GB panel) |
-| CaSpER       | matrix + BAM + known normals + BAF | **Yes (BAF)** | **Yes (required)** | No (segment-level)       | 5-30 min + BAM merge     | varies           | High (BAFExtract + Rgraphviz pain) |
+| CaSpER       | matrix + BAM + known normals + BAF | **Yes (BAF)** | **Yes (required)** | No (segment-level)       | 5-30 min + BAM merge     | varies           | High (BAFExtract + Rgraphviz) |
 
 ## Reading guide
 
