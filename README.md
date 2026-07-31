@@ -6,18 +6,9 @@ Expression-only single-cell CNV caller: a pure-Python, pip-installable tool that
 
 ## Motivation
 
-Four R-based CNV callers dominate this space, each with a different sharp edge:
+Copy-number calling from scRNA-seq is already well served by several mature tools: CopyKAT, SCEVAN, and inferCNV in R, and infercnvpy in Python. kopya fills a specific gap. It is a single pip-installable Python package and an **end-to-end automated caller**, not just a CNV-signal generator: it finds the diploid baseline, segments the genome into discrete CNV regions, and emits per-cell tumor / normal / uncertain calls with QC gates and CopyKAT-compatible outputs, sparse-first and fast enough for large cohorts.
 
-| Tool | Problem |
-|------|---------|
-| **CopyKAT** | Densifies a genes × cells matrix at 30-60 GB RAM on 10k cells; runs 1-2 h |
-| **SCEVAN** | Brittle two-step GitHub install; `parallelDist` missing on osx-arm64 conda |
-| **inferCNV** | Dead upstream (README redirects elsewhere), needs JAGS, broken on bioconda, demands user-supplied normal cells |
-| **CONICSmat** | Arm-level only, no focal events |
-
-We wanted **one Python package, one pip install, sparse-first, with opinionated defaults** that we can validate against the originals. Allele-aware calling (LOH, copy-neutral) stays the domain of Numbat; see [`docs/comparison.md`](docs/comparison.md) for the full positioning.
-
-**What about [infercnvpy](https://github.com/icbi-lab/infercnvpy)?** It is the closest peer: also pure-Python and scanpy-native. The difference is scope. infercnvpy computes a CNV-signal matrix and leaves baseline selection, segmentation, and the tumor/normal decision to you (or delegates the actual call to R CopyKAT). kopya is an end-to-end **caller** that automates all three: it finds the diploid baseline, segments the genome into discrete CNV regions, and emits tumor / normal / uncertain calls with QC gates and CopyKAT-drop-in outputs. See [`docs/comparison.md`](docs/comparison.md#closest-peer-infercnvpy) for the detailed head-to-head.
+For the detailed, tool-by-tool comparison, algorithm, scope, runtime, and exactly where kopya differs from each (including the closest peer, infercnvpy), see [`docs/comparison.md`](docs/comparison.md). Allele-aware calling (LOH, copy-neutral) stays the domain of Numbat.
 
 ## What we borrowed from the field
 
