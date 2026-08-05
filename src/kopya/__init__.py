@@ -24,6 +24,6 @@ from kopya import pl, tl
 from kopya.io import load_counts
 from kopya.pipeline import run_pipeline
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 __all__ = ["tl", "pl", "load_counts", "run_pipeline", "__version__"]

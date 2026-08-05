@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Distribution name is vendor-prefixed: plain `kopya` was taken on PyPI by an
 # unrelated project. The import name and CLI stay `kopya`.
 name = "valius-kopya"
-version = "1.0.0"
+version = "1.0.1"
 description = "Expression-only single-cell copy-number-variation caller."
 readme = "README.md"
 requires-python = ">=3.11"
