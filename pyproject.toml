@@ -6,7 +6,9 @@ build-backend = "hatchling.build"
 # Distribution name is vendor-prefixed: plain `kopya` was taken on PyPI by an
 # unrelated project. The import name and CLI stay `kopya`.
 name = "valius-kopya"
-version = "1.0.1"
+# Single source of truth is __version__ in src/kopya/__init__.py; hatch reads
+# it at build time (see [tool.hatch.version]). Bump it there, not here.
+dynamic = ["version"]
 description = "Expression-only single-cell copy-number-variation caller."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -65,6 +67,9 @@ Issues = "https://github.com/ValiusSciences/kopya/issues"
 
 [project.scripts]
 kopya = "kopya.cli:cli"
+
+[tool.hatch.version]
+path = "src/kopya/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kopya"]
