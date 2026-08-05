@@ -8,7 +8,7 @@ Expression-only single-cell CNV caller: a pure-Python, pip-installable tool that
 
 Copy-number calling from scRNA-seq is already well served by several mature tools: CopyKAT, SCEVAN, and inferCNV in R, and infercnvpy in Python. kopya fills a specific gap. It is a single pip-installable Python package and an **end-to-end automated caller**, not just a CNV-signal generator: it finds the diploid baseline, segments the genome into discrete CNV regions, and emits per-cell tumor / normal / uncertain calls with QC gates and CopyKAT-compatible outputs, sparse-first and fast enough for large cohorts.
 
-For the detailed, tool-by-tool comparison, algorithm, scope, runtime, and exactly where kopya differs from each (including the closest peer, infercnvpy), see [`docs/comparison.md`](docs/comparison.md). Allele-aware calling (LOH, copy-neutral) stays the domain of Numbat.
+For the detailed, tool-by-tool comparison, algorithm, scope, runtime, and exactly where kopya differs from each (including the closest peer, infercnvpy), see [`docs/comparison.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/comparison.md). Allele-aware calling (LOH, copy-neutral) stays the domain of Numbat.
 
 ## What we borrowed from the field
 
@@ -38,7 +38,7 @@ Five-step pipeline:
 | 4. Classify + subclones | `classify.py` | 2-component GMM on per-cell L1 distance from baseline, giving tumor / normal / uncertain; Leiden on tumor cells' per-segment CN matrix, giving subclones (max 5) |
 | 5. Write outputs | `outputs.py` | `prediction.csv`, `chr_cnv_matrix.csv` (CopyKAT-style columns), IGV `.seg`, `qc.json` |
 
-Performance scales near-linearly with cell count. The table below is 10 replicate runs per size of the full `kopya run` pipeline end to end (load through outputs) on an Apple M5 Pro (15 cores, 24 GB RAM, macOS), peak resident memory via `/usr/bin/time`; values are mean ± sd. Absolute times are hardware-dependent; the near-linear scaling is the point. Reproduce with [`scripts/benchmark_scaling.py`](scripts/benchmark_scaling.py):
+Performance scales near-linearly with cell count. The table below is 10 replicate runs per size of the full `kopya run` pipeline end to end (load through outputs) on an Apple M5 Pro (15 cores, 24 GB RAM, macOS), peak resident memory via `/usr/bin/time`; values are mean ± sd. Absolute times are hardware-dependent; the near-linear scaling is the point. Reproduce with [`scripts/benchmark_scaling.py`](https://github.com/ValiusSciences/kopya/blob/main/scripts/benchmark_scaling.py):
 
 | Cells | Wall time (s) | Peak RAM (GB) |
 |------:|--------------:|--------------:|
@@ -51,9 +51,19 @@ Performance scales near-linearly with cell count. The table below is 10 replicat
 | 400,000 | 119.3 ± 3.8 | 11.52 ± 0.53 |
 | 800,000 | 242.1 ± 4.4 | 14.91 ± 0.57 |
 
-At 10k cells that is ~12 s and ~1.8 GB peak RSS. CopyKAT's own reports put it at 1-2 h and 30-60 GB on comparable data, so kopya is roughly two orders of magnitude faster in a much smaller footprint. Those R-tool figures are the tools' published/reported numbers, not measured here; the only tool benchmarked head-to-head is infercnvpy (see [`docs/comparison.md`](docs/comparison.md)). kopya also scales to ~800k cells in about 4 minutes at ~15 GB, beyond where the R tools stay practical on commodity hardware.
+At 10k cells that is ~12 s and ~1.8 GB peak RSS. CopyKAT's own reports put it at 1-2 h and 30-60 GB on comparable data, so kopya is roughly two orders of magnitude faster in a much smaller footprint. Those R-tool figures are the tools' published/reported numbers, not measured here; the only tool benchmarked head-to-head is infercnvpy (see [`docs/comparison.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/comparison.md)). kopya also scales to ~800k cells in about 4 minutes at ~15 GB, beyond where the R tools stay practical on commodity hardware.
 
 ## Install
+
+```bash
+# From PyPI. The distribution is `valius-kopya`; the import name and CLI are `kopya`.
+pip install valius-kopya
+
+# With the optional plotting stack (matplotlib, for `plot-heatmap` and the Python-API heatmap):
+pip install "valius-kopya[plot]"
+```
+
+Development install from a clone:
 
 ```bash
 # Create the conda env, run from the repo root (Python + numpy/scipy/scanpy/sklearn/ruptures/leidenalg/pyucell).
@@ -83,7 +93,7 @@ kopya run --anndata tests/fixtures/tiny_simulated.h5ad --out-dir /tmp/kopya-demo
 kopya plot-heatmap --run-dir /tmp/kopya-demo --out /tmp/kopya-demo/heatmap.png --scale linear
 ```
 
-This writes `prediction.csv`, `chr_cnv_matrix.csv`, `segments.parquet`, `qc.json`, an IGV `.seg`, and the heatmap into `/tmp/kopya-demo/`. The fixture has three planted events (chr7 gain, chr10 loss, focal MYC amp), so it's a good place to build intuition. See [`examples/tiny_simulated/`](examples/tiny_simulated) for a pre-computed copy of these outputs and [`notebooks/working_with_results.ipynb`](notebooks/working_with_results.ipynb) for a walkthrough of every file.
+This writes `prediction.csv`, `chr_cnv_matrix.csv`, `segments.parquet`, `qc.json`, an IGV `.seg`, and the heatmap into `/tmp/kopya-demo/`. The fixture has three planted events (chr7 gain, chr10 loss, focal MYC amp), so it's a good place to build intuition. See [`examples/tiny_simulated/`](https://github.com/ValiusSciences/kopya/tree/main/examples/tiny_simulated) for a pre-computed copy of these outputs and [`notebooks/working_with_results.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/notebooks/working_with_results.ipynb) for a walkthrough of every file.
 
 ## Inputs
 
@@ -228,7 +238,7 @@ kp.pl.chromosome_heatmap(adata, groupby="cell_type")   # needs the [plot] extra 
 
 Pass `reference_key`/`reference_cat` (your normal cell types) to run supervised; recommended, and required for mesenchymal tumors (see below). Omit them for the unsupervised cascade. Raw counts are required (the tool does its own CP10k+log1p); if they live in a layer, pass `layer="counts"`. The heatmap needs the `[plot]` extra (`pip install -e ".[plot]"`).
 
-**Coming from Seurat?** See the round-trip walkthrough (annotate once in Seurat, run kopya, bring the calls back) in the executed notebook [`docs/tutorials/seurat.ipynb`](docs/tutorials/seurat.ipynb) (previews inline on GitHub, with a rendered CNV heatmap).
+**Coming from Seurat?** See the round-trip walkthrough (annotate once in Seurat, run kopya, bring the calls back) in the executed notebook [`docs/tutorials/seurat.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/docs/tutorials/seurat.ipynb) (previews inline on GitHub, with a rendered CNV heatmap).
 
 For ~1M-cell cohorts, the CLI's `run` command has a memory-lean streaming path; `tl.cnv` is the in-memory convenience path for typical objects.
 
@@ -276,9 +286,9 @@ All artifacts land under `--out-dir`:
 | `qc.json` | dict | Run-level diagnostics: cell/gene counts, baseline method, subclone counts, per-step timings |
 
 > **New to the output files?** Start with the worked example and notebook:
-> [`examples/tiny_simulated/`](examples/tiny_simulated) holds a full set of
+> [`examples/tiny_simulated/`](https://github.com/ValiusSciences/kopya/tree/main/examples/tiny_simulated) holds a full set of
 > results from a tiny 500-cell run, and
-> [`notebooks/working_with_results.ipynb`](notebooks/working_with_results.ipynb)
+> [`notebooks/working_with_results.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/notebooks/working_with_results.ipynb)
 > walks through every file: what each column means, the numeric scale of each
 > value (log-space vs 1.0-centered, when negatives are expected), and how to
 > re-center `cn_per_segment.npz` into gain/loss.
@@ -467,7 +477,7 @@ We test against publicly available datasets whose CNV ground truth is establishe
 | Maynard 2020 lung | `maynard2020_3k` (infercnvpy) | Cell-type labels (expression-derived) + kopya-vs-inferCNV | 6 PASS |
 | UCSF osteosarcoma T1 | osteosarc.com (IPISRC044_T1) | Matched bulk WES (CNVkit) | 5 PASS |
 
-¹ The Patel SMART-seq2 dataset triggers a known baseline inversion: the unsupervised UCell cascade misfires on full-length read counts, so the four hallmark-direction tests are `xfail(strict)`. Fix path: supervised mode with cell-type annotations. Full diagnosis in [`tests/external/GOLD_STANDARD_TESTING.md §6.1`](tests/external/GOLD_STANDARD_TESTING.md).
+¹ The Patel SMART-seq2 dataset triggers a known baseline inversion: the unsupervised UCell cascade misfires on full-length read counts, so the four hallmark-direction tests are `xfail(strict)`. Fix path: supervised mode with cell-type annotations. Full diagnosis in [`tests/external/GOLD_STANDARD_TESTING.md §6.1`](https://github.com/ValiusSciences/kopya/blob/main/tests/external/GOLD_STANDARD_TESTING.md).
 
 **What "ground truth" means here.** Matched DNA-level CNV truth exists only for DCIS1 and the osteosarcoma sample (each a single patient; the DCIS1 profile is digitized at chromosome-arm resolution from a published figure). The ovarian and Maynard checks compare kopya's calls against expression-derived cell-type annotations, so they measure agreement between two expression-based classifications, not DNA-level CNV accuracy. No head-to-head *accuracy* comparison against CopyKAT or SCEVAN was run; the only cross-tool check is kopya-vs-inferCNV per-chromosome concordance on Maynard.
 
@@ -482,13 +492,13 @@ pytest tests/external/ -v
 ```
 
 Full documentation (acquisition commands, acceptance criteria, per-metric results, known limitations, improvement history):
-[`tests/external/GOLD_STANDARD_TESTING.md`](tests/external/GOLD_STANDARD_TESTING.md)
+[`tests/external/GOLD_STANDARD_TESTING.md`](https://github.com/ValiusSciences/kopya/blob/main/tests/external/GOLD_STANDARD_TESTING.md)
 
 ## Documentation
 
-- [`docs/tutorials/seurat.ipynb`](docs/tutorials/seurat.ipynb): executed end-to-end tutorial: annotate in Seurat, run kopya, bring the CNV calls back (with a rendered heatmap; previews on GitHub)
-- [`notebooks/working_with_results.ipynb`](notebooks/working_with_results.ipynb): a hands-on walkthrough of every output file: what each column means, the numeric scale of each value, and how to re-center the CN matrix into gain/loss
-- [`examples/tiny_simulated/`](examples/tiny_simulated): a complete, committed result set (500-cell demo) to explore or diff against
-- [`docs/comparison.md`](docs/comparison.md): detailed positioning vs CopyKAT, SCEVAN, inferCNV, CONICSmat, Numbat, CaSpER
-- [`tests/external/GOLD_STANDARD_TESTING.md`](tests/external/GOLD_STANDARD_TESTING.md): external dataset acquisition, acceptance criteria, results, known limitations
+- [`docs/tutorials/seurat.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/docs/tutorials/seurat.ipynb): executed end-to-end tutorial: annotate in Seurat, run kopya, bring the CNV calls back (with a rendered heatmap; previews on GitHub)
+- [`notebooks/working_with_results.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/notebooks/working_with_results.ipynb): a hands-on walkthrough of every output file: what each column means, the numeric scale of each value, and how to re-center the CN matrix into gain/loss
+- [`examples/tiny_simulated/`](https://github.com/ValiusSciences/kopya/tree/main/examples/tiny_simulated): a complete, committed result set (500-cell demo) to explore or diff against
+- [`docs/comparison.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/comparison.md): detailed positioning vs CopyKAT, SCEVAN, inferCNV, CONICSmat, Numbat, CaSpER
+- [`tests/external/GOLD_STANDARD_TESTING.md`](https://github.com/ValiusSciences/kopya/blob/main/tests/external/GOLD_STANDARD_TESTING.md): external dataset acquisition, acceptance criteria, results, known limitations
 - `kopya run --help`: full CLI surface with every knob

@@ -1,15 +1,36 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]  # >=1.27 for PEP 639 license expressions
 build-backend = "hatchling.build"
 
 [project]
-name = "kopya"
+# Distribution name is vendor-prefixed: plain `kopya` was taken on PyPI by an
+# unrelated project. The import name and CLI stay `kopya`.
+name = "valius-kopya"
 version = "1.0.0"
 description = "Expression-only single-cell copy-number-variation caller."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Bulent Arman Aksoy", email = "arman@valiussciences.com" }]
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = [
+    "single-cell",
+    "scRNA-seq",
+    "copy-number",
+    "CNV",
+    "bioinformatics",
+    "cancer",
+    "genomics",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 
 dependencies = [
     "numpy>=1.26,<2",  # pyucell requires numpy<2; keeps scanpy/anndata on their last numpy<2 releases
@@ -36,6 +57,11 @@ dev = [
     "pytest-cov>=5",
     "matplotlib>=3.7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ValiusSciences/kopya"
+Repository = "https://github.com/ValiusSciences/kopya"
+Issues = "https://github.com/ValiusSciences/kopya/issues"
 
 [project.scripts]
 kopya = "kopya.cli:cli"
