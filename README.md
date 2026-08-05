@@ -1,5 +1,8 @@
 # kopya
 
+[![PyPI](https://img.shields.io/pypi/v/valius-kopya)](https://pypi.org/project/valius-kopya/)
+[![Python](https://img.shields.io/pypi/pyversions/valius-kopya)](https://pypi.org/project/valius-kopya/)
+[![License](https://img.shields.io/pypi/l/valius-kopya)](https://github.com/ValiusSciences/kopya/blob/main/LICENSE)
 [![tests](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml/badge.svg)](https://github.com/ValiusSciences/kopya/actions/workflows/test.yml)
 
 Expression-only single-cell CNV caller: a pure-Python, pip-installable tool that finds the diploid baseline, segments the genome, and calls tumor vs normal automatically. An end-to-end, R-free alternative to CopyKAT, SCEVAN, and inferCNV.
