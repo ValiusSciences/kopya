@@ -51,8 +51,16 @@ DEFAULT_CALL_CONFIDENCE = 0.5
 # baseline score distribution are excluded from GMM fitting and locked to
 # "normal". This prevents transcriptomically extreme cell types (Erythrocytes,
 # Platelets) whose high scores are driven by transcriptome-mismatch rather
-# than CNV from being incorrectly called as tumor.
-DEFAULT_OUTLIER_FENCE_MULT = 7.0
+# than CNV from being incorrectly called as tumor. A tighter fence also
+# forces genuine high-CN-burden tumor cells (multiple/large events, hence a
+# very high tumor_score) into "normal" the same way -- unlike the coherence/
+# low-complexity gates (which only ever downgrade "tumor" to "uncertain"),
+# this is the one mechanism in the classifier that can force a real tumor
+# cell all the way to "normal" and is therefore a plausible direct recall
+# cost. Widened from 7.0 to 12.0 to exclude only the most extreme outliers,
+# leaving more strong-signal tumor cells inside the GMM fit where their
+# score can earn a tumor call on its own merits.
+DEFAULT_OUTLIER_FENCE_MULT = 12.0
 
 # Floor multiplier for the global-median-based clip ceiling guard.
 # clip_ceiling is clamped to at least CLIP_FLOOR_MULT × global_median so
