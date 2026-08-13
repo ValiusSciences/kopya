@@ -293,6 +293,16 @@ def reference_relative_deviation(cn_matrix, normal_mask, baseline=None, seg_weig
     altered segments, so a cell with a real gain on 30% of its genome keeps that
     gain in the residual instead of having it averaged into its own center.
 
+    Known limitation: this assumes the truly-altered segments are a MINORITY
+    of the cell's genome. If "altered" instead covers half or more (e.g. a
+    near-whole-genome clonal event split across a gain block and a loss
+    block), there is no genuine diploid majority for the median to find —
+    whichever block covers more of the genome (or, at an exact tie, whichever
+    side the median's tie-break happens to favor) gets absorbed as if it were
+    the depth pedestal, silently erasing that block's real signal rather than
+    an artifact. See test_reference_relative_deviation_exact_tie_is_a_known_
+    limitation in tests/test_classify.py for a worked example.
+
     Args:
         cn_matrix: (n_cells × n_segments) ndarray from per_cell_segment_cn().
         normal_mask: bool array len == n_cells, True for cells in normal pool.

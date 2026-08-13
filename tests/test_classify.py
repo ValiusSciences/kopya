@@ -20,36 +20,65 @@ from kopya.classify import (
     compute_tumor_scores,
     discover_subclones,
     gmm_classify,
+    reference_relative_deviation,
 )
 
 
-def _bimodal_cn_matrix(n_normal=50, n_tumor=50, n_segments=20, seed=0):
-    """Build a (n_cells × n_segments) CN matrix with clear tumor/normal split.
+def _bimodal_cn_matrix(n_normal=50, n_tumor=50, n_segments=20, seed=0, n_diploid_padding=0):
+    """Build a (n_cells × (n_segments + n_diploid_padding)) CN matrix with a
+    clear tumor/normal split.
 
     Normal cells: ~zero across all segments (diploid baseline already centered).
-    Tumor cells: +0.5 on the first half of segments, -0.5 on the second half
-    (one big gain block, one big loss block — a realistic per-clone profile).
+    Tumor cells: +0.5 on the first half of `n_segments`, -0.5 on the second
+    half (one gain block, one loss block — a realistic per-clone profile),
+    followed by `n_diploid_padding` additional segments left at the diploid
+    baseline (~0, same background noise as everywhere else).
+
+    n_diploid_padding=0 (the default, used by most tests here) means the
+    gain+loss blocks span the ENTIRE matrix — fine for tests that only need a
+    clear aggregate tumor/normal score gap, but NOT a realistic input to
+    reference_relative_deviation's per-cell centering step: that step finds
+    each cell's own weighted-median deviation and treats it as a depth
+    pedestal to subtract, which is only correct when the truly-altered
+    segments are a MINORITY of the cell's genome (see that function's
+    docstring: "a real gain on 30% of genome keeps that gain in residual").
+    With no padding there is no genuine diploid majority for the median to
+    find, so whichever block covers the larger share (both halves, at an
+    exact tie) gets absorbed as if it were the pedestal — silently erasing
+    that block's real signal. This isn't specific to an exact 50/50 split; it
+    happens for any split once the whole genome is "altered." Tests that
+    reason about n_segments_altered in the per-cell-centered frame should
+    pass n_diploid_padding large enough that n_segments is a clear minority
+    of the total, giving a genuine diploid majority for the median to find
+    while keeping the gain/loss blocks themselves the same absolute length
+    (and hence the same behavior under the coherence gate's fixed window) as
+    the n_diploid_padding=0 case; see test_classify_cells_end_to_end.
 
     Args:
         n_normal: Number of planted-normal cells (rows 0..n_normal-1).
         n_tumor: Number of planted-tumor cells.
-        n_segments: Total segments (split half/half into gain/loss).
+        n_segments: Segments covered by the gain+loss blocks (split evenly).
         seed: RNG seed for noise.
+        n_diploid_padding: Additional always-diploid segments appended after
+            the gain+loss blocks, so the total segment count is
+            n_segments + n_diploid_padding.
 
     Returns:
         Tuple of (cn_matrix, normal_mask, tumor_mask).
     """
     rng = np.random.default_rng(seed)
     n_cells = n_normal + n_tumor
+    total_segments = n_segments + n_diploid_padding
 
     # Per-entry Gaussian noise so cells aren't pathologically identical.
-    cn = rng.normal(loc=0.0, scale=0.05, size=(n_cells, n_segments)).astype(np.float32)
+    cn = rng.normal(loc=0.0, scale=0.05, size=(n_cells, total_segments)).astype(np.float32)
 
-    # Plant a gain (+0.5) on the first half of segments, a loss (-0.5) on the
-    # second, applied only to tumor rows.
+    # Plant a gain (+0.5) on the first half of n_segments, a loss (-0.5) on
+    # the second half, applied only to tumor rows. Columns n_segments:total
+    # are left at the diploid background noise from above (the padding).
     half = n_segments // 2
     cn[n_normal:, :half] += 0.5
-    cn[n_normal:, half:] -= 0.5
+    cn[n_normal:, half:n_segments] -= 0.5
 
     normal_mask = np.array([True] * n_normal + [False] * n_tumor)
     tumor_mask = ~normal_mask
@@ -143,7 +172,15 @@ def test_discover_subclones_below_floor_returns_one_clone():
 
 def test_classify_cells_end_to_end():
     """classify_cells composes scores + GMM + subclones into one DataFrame."""
-    cn, normal_mask, tumor_mask = _bimodal_cn_matrix(n_normal=30, n_tumor=70)
+    # n_diploid_padding=30: a realistic clone where the 20-segment gain+loss
+    # block is a clear minority (20/50 = 40%) against a genuine diploid
+    # majority elsewhere — NOT n_diploid_padding=0 (the default), which plants
+    # alteration across the whole genome and leaves no genuine diploid
+    # majority for the per-cell centering step's median to find (see
+    # _bimodal_cn_matrix's docstring). The gain/loss blocks keep the same
+    # absolute length (10 segments each) either way, so the coherence gate's
+    # behavior on them is unaffected by this change.
+    cn, normal_mask, tumor_mask = _bimodal_cn_matrix(n_normal=30, n_tumor=70, n_diploid_padding=30)
     # Provide a minimal segments DataFrame (only n_genes_altered uses it
     # transitively, via the dev tolerance heuristic).
     segments = pd.DataFrame({
@@ -166,10 +203,13 @@ def test_classify_cells_end_to_end():
     assert df.index.name == "barcode"
     assert list(df.columns) == ["class", "confidence", "tumor_score", "subclone", "n_segments_altered", "low_complexity"]
 
-    # Tumor cells were planted to alter ALL segments; n_segments_altered for
-    # tumor cells should equal the total segment count (modulo noise floor).
+    # Tumor cells were planted to alter 20 of 50 segments (a minority, with a
+    # genuine diploid majority in the padding); n_segments_altered for tumor
+    # cells should land on that count (modulo noise floor) — the per-cell
+    # centering step correctly leaves a minority-altered clone's signal
+    # intact rather than absorbing it as a depth pedestal.
     tumor_df = df[df["class"] == "tumor"]
-    assert (tumor_df["n_segments_altered"] >= cn.shape[1] - 2).all()
+    assert (tumor_df["n_segments_altered"] >= 18).all()
 
     # Tumor cells should carry a subclone label.
     assert (tumor_df["subclone"].str.startswith("subclone_")).all()
@@ -228,20 +268,40 @@ def test_coherent_fraction_gates_edge_isolated_spike():
 
 
 def test_coherence_gate_downgrades_scattered_cell():
-    """A sign-alternating (scattered) cell that scores in the tumor range is
-    downgraded to uncertain, while coherent tumor cells are unaffected."""
+    """A cell whose deviation ALIGNS with the cohort's consensus CN pattern in
+    aggregate (enough to score in the tumor range via template_projection) but
+    is NOT locally contiguous is still downgraded to uncertain; coherent tumor
+    cells are unaffected.
+
+    This is not a pure-noise alternating pattern (e.g. +0.5/-0.5 every other
+    segment): under template_projection, a pattern whose positive and negative
+    parts don't track the template's own sign structure nets to ~0 in the
+    projection and is already correctly called 'normal' with NO gate involved
+    at all -- template_projection's directional scoring already subsumes that
+    failure mode, which the older, magnitude-only compute_tumor_scores did not.
+    The remaining, still-real job for the coherence gate under the new scoring
+    is a cell whose deviation matches the template's sign PER HALF (positive
+    where the template gains, negative where it loses) but arrives as isolated
+    spikes rather than a contiguous run -- template_projection alone cannot
+    tell that apart from a real clonal block, because it only reasons about
+    aggregate alignment, not spatial layout.
+    """
     cn, normal_mask, _ = _bimodal_cn_matrix(n_normal=50, n_tumor=49, n_segments=20)
-    # One cell with the same magnitude as tumor cells (so the GMM puts it in the
-    # tumor component) but an alternating, non-contiguous profile — no real CNV.
+    # Isolated spikes (every 3rd segment within each half -- the same spacing
+    # test_coherence_gate_downgrades_same_sign_scatter already validates as
+    # "not locally coherent"), signed to match the template: positive in the
+    # first half (where the cohort's real tumor cells gain), negative in the
+    # second (where they lose). Same magnitude range as a real tumor cell, but
+    # a real clonal block would be contiguous, not spiky.
     scattered = np.zeros((1, cn.shape[1]), dtype=np.float32)
-    scattered[0, ::2] = 0.5
-    scattered[0, 1::2] = -0.5
+    scattered[0, 0:10:3] = 2.5
+    scattered[0, 10:20:3] = -2.5
     cn2 = np.vstack([cn, scattered])
     normal_mask2 = np.append(normal_mask, False)
     segments = _two_chrom_segments(cn2.shape[1])
     barcodes = [f"cell_{i}" for i in range(cn2.shape[0])]
 
-    # With the gate off, the scattered cell is called tumor (magnitude alone).
+    # With the gate off, the spiky cell is called tumor (aggregate alignment alone).
     off = classify_cells(cn2, segments, normal_mask2, barcodes, coherence_gate=0.0)
     assert off.iloc[-1]["class"] == "tumor"
     # With the gate on, it is downgraded to uncertain; coherent tumors stay tumor.
@@ -293,6 +353,41 @@ def test_low_complexity_mask_contract():
     # All-equal positive complexity -> none below frac*median (frac < 1).
     m = _low_complexity_mask(np.full(5, 3000.0), 0.5, 5)
     assert not m.any()
+
+
+def test_reference_relative_deviation_exact_tie_is_a_known_limitation():
+    """Known, documented limitation of the per-cell centering step: it treats
+    whatever covers a MAJORITY (by weight) of a cell's segments as that cell's
+    depth pedestal and subtracts it — correct when the truly-altered segments
+    are a minority (the documented, realistic case), but not when "altered"
+    covers half or more of the genome. In that case whichever block is larger
+    (or, at an exact tie, whichever the median's tie-break happens to favor)
+    gets absorbed as if it were the pedestal, silently erasing that block's
+    real signal rather than a depth artifact.
+
+    This test uses the sharpest instance (an exact 50/50 split, so there is no
+    majority at all) because it is the cleanest illustration, not because
+    only exact ties are affected — see _bimodal_cn_matrix's docstring, which
+    documents this as a general property (the gain+loss blocks must be a
+    minority of the total, via n_diploid_padding), and why
+    test_classify_cells_end_to_end deliberately pads its matrix with extra
+    diploid segments rather than relying on some other split ratio.
+    """
+    # One cell, 10 equal-weight segments: +0.5 on the first 5 (a real gain),
+    # -0.5 on the last 5 (a real loss) — an exact 50/50 weighted tie.
+    dev = np.array([[0.5] * 5 + [-0.5] * 5], dtype=np.float32)
+    seg_weights = np.ones(10)
+
+    centered = reference_relative_deviation(
+        dev, normal_mask=np.array([False]), baseline=np.zeros(10), seg_weights=seg_weights,
+    )
+
+    # The tie collapses the symmetric +0.5/-0.5 signal into a single asymmetric
+    # plateau (here: +1.0 on the gain block, 0.0 on the loss block) rather than
+    # preserving both halves — half the segments read as "no deviation" even
+    # though they carry real, planted CN.
+    magnitudes = sorted(float(v) for v in np.unique(centered))
+    assert magnitudes == [0.0, 1.0]
 
 
 def test_normal_pool_baseline_fallback_and_reuse():
