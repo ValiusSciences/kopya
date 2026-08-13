@@ -54,6 +54,9 @@ import numpy as np
 import pandas as pd
 
 from kopya.annotations import CANONICAL_CHROM_ORDER
+# Single definition of the per-cell genome-wide center, shared with the
+# classifier: the tumor score and this figure must agree on where diploid sits.
+from kopya.classify import weighted_median_rows as _weighted_median_rows
 
 # Categorical colours for the subclone annotation bar. Deliberately avoid the
 # blue/red of the heatmap body so subclone identity never reads as gain/loss.
@@ -116,32 +119,6 @@ def _cluster_leaf_order(mat, cluster_max):
         return leaves_list(linkage(mat, method="ward"))
     except Exception:  # pragma: no cover - defensive against degenerate input
         return np.arange(n)
-
-
-def _weighted_median_rows(mat, weights):
-    """Per-row weighted median of ``mat`` with per-column weights.
-
-    The weighted median is the value at which the cumulative column weight — in
-    ascending value order — first reaches half the total. Weighting by segment
-    gene count keeps a cell's genome-wide center tied to the genomic majority
-    rather than the segment count: otherwise many short segments packed into one
-    altered region could pull the per-cell baseline and make the unchanged
-    majority read as a gain or loss.
-
-    Args:
-        mat: (n_rows × n_cols) ndarray.
-        weights: (n_cols,) non-negative column weights.
-
-    Returns:
-        (n_rows,) ndarray of per-row weighted medians.
-    """
-    order = np.argsort(mat, axis=1)
-    sorted_vals = np.take_along_axis(mat, order, axis=1)
-    cumw = np.cumsum(weights[order], axis=1)
-    half = 0.5 * float(weights.sum())
-    # First position whose cumulative weight reaches the halfway mark.
-    idx = np.argmax(cumw >= half, axis=1)
-    return sorted_vals[np.arange(mat.shape[0]), idx]
 
 
 def _recenter(cn, normal_mask, seg_weights):

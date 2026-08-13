@@ -21,16 +21,22 @@ classify_cells() composes the three into a single per-cell DataFrame.
 from anndata import AnnData
 from numpy import (
     abs as np_abs,
+    arange,
+    argmax,
+    argsort,
     asarray,
     clip,
+    cumsum,
     full,
     median,
     minimum as np_minimum,
     ones,
     percentile,
     sign as np_sign,
+    take_along_axis,
     unique,
     where,
+    zeros,
     zeros_like,
 )
 from pandas import DataFrame, Series
@@ -106,9 +112,48 @@ DEFAULT_LOW_COMPLEXITY_FRAC = 0.5
 # broadly-aneuploid tumor cells clear it easily.
 DEFAULT_COHERENCE_GATE = 0.45
 
+# Burden quantile above which a cell seeds the consensus CN template (see
+# consensus_template). 0.75 = the top quartile by aneuploidy burden. High enough
+# that the seed set is dominated by genuinely altered cells on a low-purity
+# sample, low enough that the average is over thousands of cells on a real
+# cohort, so clonal CN survives it and per-cell noise does not.
+DEFAULT_TEMPLATE_SEED_QUANTILE = 0.75
+
 # Moving-average width (in segments) for the local-contiguity coherence measure.
 # Small so it captures short contiguous runs without spanning whole chromosomes.
 COHERENCE_WINDOW = 5
+
+
+def weighted_median_rows(mat, weights):
+    """Per-row weighted median of ``mat`` with per-column weights.
+
+    The weighted median is the value at which the cumulative column weight — in
+    ascending value order — first reaches half the total. Weighting by segment
+    gene count keeps a cell's genome-wide center tied to the genomic majority
+    rather than the segment count: otherwise many short segments packed into one
+    altered region could pull the per-cell baseline and make the unchanged
+    majority read as a gain or loss.
+
+    Lives here (rather than in the heatmap module that first needed it) because
+    the per-cell genome-wide center is part of recovering the CN signal, not part
+    of drawing it — ``compute_tumor_scores`` and ``heatmap._recenter`` must use
+    the same definition or the classifier and the figures disagree about where
+    diploid sits.
+
+    Args:
+        mat: (n_rows × n_cols) ndarray.
+        weights: (n_cols,) non-negative column weights.
+
+    Returns:
+        (n_rows,) ndarray of per-row weighted medians.
+    """
+    order = argsort(mat, axis=1)
+    sorted_vals = take_along_axis(mat, order, axis=1)
+    cumw = cumsum(asarray(weights, dtype="float64")[order], axis=1)
+    half = 0.5 * float(asarray(weights, dtype="float64").sum())
+    # First position whose cumulative weight reaches the halfway mark.
+    idx = argmax(cumw >= half, axis=1)
+    return sorted_vals[arange(mat.shape[0]), idx]
 
 
 def _normal_pool_baseline(cn_matrix, normal_mask):
@@ -125,7 +170,7 @@ def _normal_pool_baseline(cn_matrix, normal_mask):
     return median(cn_matrix, axis=0)
 
 
-def _coherent_fraction(cn_matrix, segments, baseline, window=COHERENCE_WINDOW):
+def _coherent_fraction(dev, segments, window=COHERENCE_WINDOW):
     """Per-cell fraction of CN deviation that is *locally contiguous*.
 
     A real CNV shows up as a run of same-sign deviation across neighbouring
@@ -153,19 +198,22 @@ def _coherent_fraction(cn_matrix, segments, baseline, window=COHERENCE_WINDOW):
     coherent fraction is dominated by its many well-segmented chromosomes.
 
     Args:
-        cn_matrix: (n_cells × n_segments) ndarray. Pass only the rows you need
-            scored (e.g. the tumor-called cells) — the result is per-row and
-            independent of which other rows are present.
+        dev: (n_cells × n_segments) reference-relative deviation from
+            reference_relative_deviation(). Pass only the rows you need scored
+            (e.g. the tumor-called cells) — the result is per-row and independent
+            of which other rows are present. Taking the deviation rather than
+            (cn_matrix, baseline) keeps the gate measuring the exact same
+            quantity the tumor score does, per-cell centering included: on a
+            profile that still carries its per-cell global offset every segment
+            shares one sign, which reads as maximally coherent and makes the gate
+            unable to fire at all.
         segments: DataFrame from detect_segments(); the ``chr`` column groups
             segments into chromosomes (smoothing never crosses a boundary).
-        baseline: (n_segments,) per-segment normal-pool baseline from
-            _normal_pool_baseline(); subtracted from every row before smoothing.
         window: moving-average width in segments, clamped per chromosome.
 
     Returns:
-        1-D float array len == cn_matrix.shape[0], each in [0, 1].
+        1-D float array len == dev.shape[0], each in [0, 1].
     """
-    dev = cn_matrix - baseline
     total = np_abs(dev).sum(axis=1)
     chrom = asarray(segments["chr"])
     coherent = zeros_like(dev)
@@ -214,14 +262,63 @@ def _low_complexity_mask(complexity, frac, n_cells):
     return complexity < frac * med
 
 
-def compute_tumor_scores(cn_matrix, normal_mask, baseline=None):
+def reference_relative_deviation(cn_matrix, normal_mask, baseline=None, seg_weights=None):
+    """The per-cell, per-segment CN deviation the classifier should reason about.
+
+    Two subtractions, in this order — the same two ``heatmap._recenter`` applies
+    (and therefore the same frame the heatmap, ``--denoise-outputs`` and the
+    matched-bulk concordance are all computed in):
+
+      1. per-segment median over the normal pool → reference cells sit at ~0;
+      2. each cell's own genome-wide (gene-count-weighted) median → the per-cell
+         global offset is removed.
+
+    Step 2 is what this function exists for. ``center_against_baseline``
+    subtracts the per-gene median over the normal pool, but any gene detected in
+    <= 50% of normal cells has a median of exactly 0 and so passes through
+    UNCENTERED — on real data that is the large majority of the genes that
+    survive the detection-rate filter. Their summed contribution is a function of
+    how many genes the cell happened to detect, i.e. of its library depth, and it
+    is near-constant across segments. So every cell carries a global pedestal
+    proportional to its sequencing depth, on top of its real regional CN.
+
+    A magnitude score taken before removing that pedestal measures mostly depth:
+    the offset enters every segment, so it scales with the segment count while
+    real focal events do not. (Measured on this repo's benchmark cohort it is
+    50-90% of the raw L1, and within known-diploid reference cells the resulting
+    score correlates with detected-gene count at up to r = +0.88 — a correlation
+    that cannot be copy number, because those cells have none.)
+
+    A weighted median is used, not a mean: it is robust to the cell's genuinely
+    altered segments, so a cell with a real gain on 30% of its genome keeps that
+    gain in the residual instead of having it averaged into its own center.
+
+    Args:
+        cn_matrix: (n_cells × n_segments) ndarray from per_cell_segment_cn().
+        normal_mask: bool array len == n_cells, True for cells in normal pool.
+        baseline: optional precomputed per-segment baseline (from
+            _normal_pool_baseline); computed from normal_mask when omitted.
+        seg_weights: (n_segments,) per-segment gene counts. When omitted, step 2
+            is skipped and the raw per-segment deviation is returned (the
+            pre-1.1 behaviour), so callers without a segment table still work.
+
+    Returns:
+        (n_cells × n_segments) ndarray of reference-relative deviations.
+    """
+    if baseline is None:
+        baseline = _normal_pool_baseline(cn_matrix, normal_mask)
+    dev = cn_matrix - baseline
+    if seg_weights is not None:
+        dev = dev - weighted_median_rows(dev, seg_weights)[:, None]
+    return dev
+
+
+def compute_tumor_scores(cn_matrix, normal_mask, baseline=None, seg_weights=None):
     """Per-cell L1 distance from the normal-pool median CN vector.
 
-    The normal-pool median is the segment-wise median CN across cells in the
-    normal pool — by construction, a per-segment baseline of ~0 (because the
-    upstream centering already subtracted the per-gene normal median, and
-    segment means inherit that). Each cell's score is the sum of absolute
-    deviations from this baseline across all segments.
+    Computed on the reference-relative deviation (see
+    ``reference_relative_deviation``), i.e. after both the per-segment normal
+    baseline and the cell's own genome-wide median have been removed.
 
     Args:
         cn_matrix: (n_cells × n_segments) ndarray from per_cell_segment_cn().
@@ -230,19 +327,142 @@ def compute_tumor_scores(cn_matrix, normal_mask, baseline=None):
             _normal_pool_baseline); computed from normal_mask when omitted. Lets
             classify_cells compute the baseline once and share it across the
             score, coherence gate, and n_segments_altered.
+        seg_weights: (n_segments,) per-segment gene counts; forwarded to
+            reference_relative_deviation for the per-cell centering step.
 
     Returns:
         1-D float array of tumor scores, len == n_cells.
     """
-    if baseline is None:
-        baseline = _normal_pool_baseline(cn_matrix, normal_mask)
+    deviations = np_abs(
+        reference_relative_deviation(
+            cn_matrix, normal_mask, baseline=baseline, seg_weights=seg_weights,
+        )
+    )
+    return segment_burden(deviations, seg_weights)
 
-    # L1 across segments per cell. Sum (not mean) so cells with broader
-    # alterations score higher than cells with one focal event — matches the
-    # "aneuploidy load" intuition behind CopyKAT/SCEVAN tumor calling.
-    deviations = np_abs(cn_matrix - baseline)
-    scores = deviations.sum(axis=1)
-    return scores
+
+def segment_burden(deviations, seg_weights=None):
+    """Aggregate a per-segment magnitude into one per-cell aneuploidy burden.
+
+    L1 across segments per cell, so cells with broader alterations score higher
+    than cells with one focal event — the "aneuploidy load" intuition behind
+    CopyKAT/SCEVAN tumor calling.
+
+    The sum is weighted by segment gene count and normalized to the genome, so
+    the burden is a **genome-fraction-weighted** mean deviation rather than a
+    per-segment count. Segments are not comparable units: PELT emits them from
+    25 genes up to ~350 on real data (>10x), and the number it emits per
+    chromosome is set by the noise it finds there, not by how much genome the
+    chromosome holds. An unweighted sum therefore lets a chromosome that happened
+    to be cut into twenty short noisy segments contribute twenty noise terms while
+    a single long clean segment contributes one — the score partly measures how
+    finely each region got segmented. Weighting by ``n_genes`` makes a cell's
+    burden depend on how much of its genome is altered, which is what the
+    quantity is supposed to mean, and makes it comparable across samples whose
+    segmentation granularity differs.
+
+    Uses the same weights as the per-cell centering above, so the segment a cell
+    is centered on and the segment that contributes to its burden carry the same
+    importance.
+
+    Args:
+        deviations: (n_cells × n_segments) non-negative per-segment magnitude.
+        seg_weights: (n_segments,) per-segment gene counts. When omitted, falls
+            back to the unweighted per-segment sum.
+
+    Returns:
+        1-D float array len == n_cells.
+    """
+    if seg_weights is None:
+        return deviations.sum(axis=1)
+    w = asarray(seg_weights, dtype="float64")
+    return (deviations * w).sum(axis=1) / w.sum()
+
+
+def consensus_template(dev, seg_weights=None, seed_quantile=DEFAULT_TEMPLATE_SEED_QUANTILE):
+    """The sample's own consensus CN profile, estimated without any labels.
+
+    A per-segment template of "what this sample's copy-number alterations look
+    like", built in two passes over the same deviation matrix:
+
+      1. score every cell by its label-free aneuploidy burden (``segment_burden``);
+      2. average the deviation over the most-aneuploid ``1 - seed_quantile``
+         fraction of cells.
+
+    Real CNVs are shared by a clonal population, so they survive that average;
+    per-cell transcriptional noise is independent between cells and averages away.
+    The result is a noisy but unbiased estimate of the malignant population's CN
+    profile.
+
+    Deliberately does NOT use ``normal_mask`` or ``segments.tumor_mean``, both of
+    which are available here. ``tumor_mean`` is the pooled mean over the
+    complement of the reference pool, so on a supervised run it is a function of
+    the user's own tumor/normal split — using it as the scoring template would
+    make the discriminant partly a restatement of that input rather than a
+    measurement of copy number. Seeding on burden instead keeps the template a
+    property of the data. (Empirically, on this repo's benchmark cohort the
+    label-free template scores marginally BETTER than the pooled one — mean AUC
+    0.925 vs 0.920 — so nothing is given up for the independence.)
+
+    Args:
+        dev: (n_cells × n_segments) reference-relative deviation.
+        seg_weights: (n_segments,) per-segment gene counts.
+        seed_quantile: burden quantile above which a cell seeds the template.
+
+    Returns:
+        (n_segments,) float array: the consensus per-segment deviation.
+    """
+    burden = segment_burden(np_abs(dev), seg_weights)
+    thr = float(percentile(burden, 100.0 * seed_quantile))
+    seed = burden >= thr
+    # Degenerate guard: an exactly-constant burden makes the threshold equal the
+    # maximum and could select nothing. Fall back to the whole cohort, which gives
+    # a ~zero template and hence ~zero scores — the honest answer for a sample
+    # with no detectable CN structure.
+    if not seed.any():
+        seed = ones(dev.shape[0], dtype=bool)
+    return dev[seed].mean(axis=0)
+
+
+def template_projection(dev, template, seg_weights=None):
+    """Per-cell signed alignment with the consensus CN template.
+
+    ``sum_s w_s t_s dev_is / sum_s |w_s t_s|`` — a gene-count-weighted projection,
+    normalized so a cell carrying the full consensus profile scores ~1, a cell
+    with no CN scores ~0, and a cell deviating opposite to the consensus scores
+    negative.
+
+    Why this rather than the magnitude burden it replaces: the burden is
+    ``sum |dev|``, which counts every departure from the reference as evidence of
+    malignancy regardless of direction. But a specialized normal cell's
+    transcriptional mismatch is *directionally arbitrary* — it has no reason to
+    align with this tumor's particular gains and losses — while a malignant cell's
+    deviation does align, because it is the same clonal event. Projecting onto the
+    consensus keeps the aligned component and cancels the arbitrary one, so the
+    classes separate on direction as well as magnitude. It is also the component
+    of the signal matched-bulk truth actually constrains.
+
+    Any residual per-cell global offset projects onto ``sum_s w_s t_s``, which is
+    near zero whenever the consensus holds both gains and losses — so this is
+    additionally robust to whatever the per-cell centering upstream did not catch.
+
+    Args:
+        dev: (n_cells × n_segments) reference-relative deviation.
+        template: (n_segments,) consensus deviation from consensus_template().
+        seg_weights: (n_segments,) per-segment gene counts.
+
+    Returns:
+        1-D float array len == dev.shape[0]. Signed.
+    """
+    w = asarray(template, dtype="float64")
+    if seg_weights is not None:
+        w = w * asarray(seg_weights, dtype="float64")
+    denom = float(np_abs(w).sum())
+    if denom <= 0.0:
+        # No template at all (a sample with no detectable CN structure): every
+        # cell scores 0 and gmm_classify's constant-score guard calls them normal.
+        return zeros(dev.shape[0], dtype="float64")
+    return (dev * w).sum(axis=1) / denom
 
 
 def gmm_classify(
@@ -270,11 +490,12 @@ def gmm_classify(
             cell types (Erythrocytes, Platelets) — whose high scores reflect
             transcriptome mismatch rather than CNV — from contaminating the
             GMM and displacing the true tumor signal.
-        clip_floor_mult: Floor multiplier applied to the global score median
-            when computing the clip ceiling. Ensures the ceiling does not
-            fall below clip_floor_mult × median (guards against over-clipping
-            in high-tumor-fraction samples where tumor cells pull the median
-            up). Default 1.24.
+        clip_floor_mult: **No longer consulted.** It was the floor multiplier on
+            the global score median that guarded the old reference-relative clip
+            ceiling against over-clipping high-tumor-fraction samples. The ceiling
+            is now a global tail quantile, which cannot over-clip in that way, so
+            the guard has nothing to do. Kept in the signature so existing callers
+            and the CLI keep working unchanged.
 
     Returns:
         DataFrame with columns:
@@ -302,12 +523,29 @@ def gmm_classify(
         baseline_s = scores[nm]
         bq75 = float(percentile(baseline_s, 75))
         bq25 = float(percentile(baseline_s, 25))
-        bq90 = float(percentile(baseline_s, 90))
         biqr = bq75 - bq25
-        tukey_fence = bq75 + 1.5 * biqr
-        clip_ceiling = min(bq90, tukey_fence)
-        global_q50 = float(percentile(scores, 50))
-        clip_ceiling = max(clip_ceiling, global_q50 * clip_floor_mult)
+        # Winsorization ceiling: the 99th percentile of the WHOLE score
+        # distribution — the same rule the no-normal-mask branch below already
+        # applies, now used in both.
+        #
+        # It used to be a reference-relative ceiling
+        # (min(refQ90, refQ75 + 1.5*refIQR), floored at clip_floor_mult * global
+        # median), i.e. "just above where the reference cells sit". That has the
+        # wrong sign of dependence: the winsorization exists to stop a handful of
+        # transcriptome-extreme cells from dragging the GMM's components, so it
+        # should bound the extreme TAIL — but pinning it to the reference spread
+        # instead bounds the tumor population itself, and does so more tightly the
+        # better the score gets. A score that separates the classes cleanly has, by
+        # construction, a tight reference distribution, so refQ90 lands far below
+        # the tumor mode and the entire malignant population collapses onto one
+        # value before the GMM ever sees it. Measured on this repo's benchmark
+        # cohort: 46-91% of true tumor cells clipped to the ceiling under a signed
+        # projection score (0.8-66% under the old magnitude score) — i.e. the
+        # defect scaled up exactly as the upstream signal improved.
+        #
+        # A global tail quantile has no such coupling: it always bounds ~1% of
+        # cells whatever the score's dynamic range.
+        clip_ceiling = float(percentile(scores, 99))
 
         # Outlier detection: non-baseline cells scoring well above the baseline
         # distribution (> outlier_fence_mult * IQR above Q75) are likely
@@ -320,6 +558,16 @@ def gmm_classify(
         # small IQR). In that case the fence would incorrectly exclude
         # legitimate high-scoring tumor cells. The clip itself already handles
         # the compression needed for GMM stability.
+        #
+        # NOTE: this fence shares the reference-relative scaling problem described
+        # above — it is measured in units of the reference pool's own IQR, which
+        # shrinks as the score's noise is removed, so a cleanly-separating score is
+        # the case it misfires on. On a synthetic sample with a clean clonal
+        # gain+loss it locks 100/100 true tumor cells to "normal". It happens to be
+        # inert on this repo's benchmark cohort (0 cells fenced at the shipped
+        # multiplier of 12.0, which is why widening it further saturated), so it is
+        # left alone here rather than changed on evidence this cohort cannot
+        # provide.
         outlier_fence = bq75 + outlier_fence_mult * biqr
         if outlier_fence > clip_ceiling:
             outlier_mask = (~nm) & (scores > outlier_fence)
@@ -330,7 +578,12 @@ def gmm_classify(
         nm = asarray(normal_mask, dtype=bool) if normal_mask is not None else None
         outlier_mask = asarray([False] * len(scores), dtype=bool)
 
-    scores_for_fit = clip(scores, 0, clip_ceiling)
+    # Winsorize the TOP only. The lower bound is left open because the score is
+    # signed (a cell deviating opposite to the consensus scores below 0), and a
+    # hard floor at 0 would collapse that whole tail onto one value and hand the
+    # GMM a spurious point mass. For a non-negative score this is identical to
+    # the previous clip(scores, 0, ceiling).
+    scores_for_fit = clip(scores, None, clip_ceiling)
 
     # Exclude outlier cells from GMM fitting; they do not represent the
     # tumor/normal distribution we want to learn.
@@ -542,7 +795,20 @@ def classify_cells(
     # Compute the per-segment normal-pool baseline ONCE and share it across the
     # score, the coherence gate, and the n_segments_altered count below.
     baseline = _normal_pool_baseline(cn_matrix, normal_mask)
-    scores = compute_tumor_scores(cn_matrix, normal_mask, baseline=baseline)
+    # Segment gene counts weight the per-cell genome-wide center (see
+    # reference_relative_deviation). Computed once and shared by the score, the
+    # coherence gate and n_segments_altered so all three reason about the SAME
+    # deviation — two different notions of "deviation from diploid" inside one
+    # classifier is how a gate ends up gating something the score never saw.
+    seg_weights = segments["n_genes"].to_numpy() if "n_genes" in segments else None
+    dev = reference_relative_deviation(
+        cn_matrix, normal_mask, baseline=baseline, seg_weights=seg_weights,
+    )
+    # Signed alignment with the sample's own consensus CN profile, rather than
+    # the magnitude of any departure from the reference (see
+    # template_projection for why direction is the discriminating part).
+    template = consensus_template(dev, seg_weights)
+    scores = template_projection(dev, template, seg_weights)
     call_df = gmm_classify(
         scores,
         normal_mask=normal_mask,
@@ -566,7 +832,7 @@ def classify_cells(
     if coherence_gate and coherence_gate > 0:
         tumor_idx = where(labels == "tumor")[0]
         if tumor_idx.size:
-            coh_frac = _coherent_fraction(cn_matrix[tumor_idx], segments, baseline)
+            coh_frac = _coherent_fraction(dev[tumor_idx], segments)
             coh_gate = tumor_idx[coh_frac < coherence_gate]
             labels[coh_gate] = "uncertain"
             gated[coh_gate] = True
@@ -592,12 +858,13 @@ def classify_cells(
         subclones = full(cn_matrix.shape[0], "", dtype=object).astype(str)
 
     # ── n_segments_altered per cell ───────────────────────────────────────
-    # Count segments where the cell's deviation from the normal-pool baseline
-    # exceeds 0.2 in log space. Useful for downstream filtering and for
-    # spotting "barely-tumor" calls with one or two focal events. Reuses the
-    # baseline computed above.
-    deviations = np_abs(cn_matrix - baseline)
-    n_segments_altered = (deviations > 0.2).sum(axis=1).astype(int)
+    # Count segments where the cell's reference-relative deviation exceeds 0.2 in
+    # log space. Useful for downstream filtering and for spotting "barely-tumor"
+    # calls with one or two focal events. Reuses the deviation computed above, so
+    # the count is of genuinely regional departures rather than of the per-cell
+    # global offset (which, being present in every segment, previously made this
+    # a proxy for library depth on deep cells).
+    n_segments_altered = (np_abs(dev) > 0.2).sum(axis=1).astype(int)
 
     # ── assemble per-cell DataFrame ───────────────────────────────────────
     out = DataFrame(

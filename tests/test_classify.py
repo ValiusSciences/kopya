@@ -219,11 +219,12 @@ def test_coherent_fraction_gates_edge_isolated_spike():
     """An isolated spike in the FIRST/LAST segment of a chromosome must score below
     the gate (regression: mode='nearest' padding gave it a spurious ~0.6)."""
     segments = _two_chrom_segments(12)
-    baseline = np.zeros(12)
+    # _coherent_fraction takes the reference-relative deviation directly, so these
+    # arrays ARE the deviation (a zero baseline, per-cell centering already done).
     edge = np.zeros((1, 12), dtype=np.float32); edge[0, 0] = 0.8          # first segment of chr1
     run = np.zeros((1, 12), dtype=np.float32); run[0, 1:5] = 0.5          # contiguous run, interior
-    assert _coherent_fraction(edge, segments, baseline)[0] < DEFAULT_COHERENCE_GATE
-    assert _coherent_fraction(run, segments, baseline)[0] > DEFAULT_COHERENCE_GATE
+    assert _coherent_fraction(edge, segments)[0] < DEFAULT_COHERENCE_GATE
+    assert _coherent_fraction(run, segments)[0] > DEFAULT_COHERENCE_GATE
 
 
 def test_coherence_gate_downgrades_scattered_cell():
