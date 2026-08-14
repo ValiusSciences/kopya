@@ -18,9 +18,12 @@ from kopya.classify import (
     _normal_pool_baseline,
     classify_cells,
     compute_tumor_scores,
+    consensus_template,
     discover_subclones,
     gmm_classify,
     reference_relative_deviation,
+    segment_burden,
+    template_projection,
 )
 
 
@@ -201,7 +204,14 @@ def test_classify_cells_end_to_end():
 
     # Schema sanity.
     assert df.index.name == "barcode"
-    assert list(df.columns) == ["class", "confidence", "tumor_score", "subclone", "n_segments_altered", "low_complexity"]
+    assert list(df.columns) == [
+        "class", "confidence", "tumor_score", "cn_burden", "subclone",
+        "n_segments_altered", "low_complexity",
+    ]
+    # tumor_score is the signed projection; cn_burden is its non-negative
+    # magnitude companion. Consumers picking a diploid baseline rank on the
+    # latter, so it must actually be non-negative.
+    assert (df["cn_burden"].to_numpy() >= 0).all()
 
     # Tumor cells were planted to alter 20 of 50 segments (a minority, with a
     # genuine diploid majority in the padding); n_segments_altered for tumor
@@ -286,16 +296,33 @@ def test_coherence_gate_downgrades_scattered_cell():
     tell that apart from a real clonal block, because it only reasons about
     aggregate alignment, not spatial layout.
     """
-    cn, normal_mask, _ = _bimodal_cn_matrix(n_normal=50, n_tumor=49, n_segments=20)
+    # n_diploid_padding=40 so the planted clone is a genuine minority of the
+    # genome. Without it the per-cell centering absorbs the tumor cells' loss
+    # block (see test_reference_relative_deviation_exact_tie_is_a_known_
+    # limitation), the template's second half is noise rather than a loss, and
+    # the "negative where they lose" premise below does not actually hold.
+    cn, normal_mask, _ = _bimodal_cn_matrix(
+        n_normal=50, n_tumor=49, n_segments=20, n_diploid_padding=40,
+    )
     # Isolated spikes (every 3rd segment within each half -- the same spacing
     # test_coherence_gate_downgrades_same_sign_scatter already validates as
     # "not locally coherent"), signed to match the template: positive in the
     # first half (where the cohort's real tumor cells gain), negative in the
-    # second (where they lose). Same magnitude range as a real tumor cell, but
-    # a real clonal block would be contiguous, not spiky.
+    # second (where they lose).
+    #
+    # Amplitude 1.5 against the clone's 0.5 is deliberate and is NOT "the same
+    # magnitude range" (the claim this fixture used to make): covering a third of
+    # the segments a real clonal block covers, a cell needs ~3x the per-segment
+    # amplitude to reach the same aggregate projection, which is precisely what
+    # makes it a test of spatial layout at matched score. It is low enough that
+    # the cell is one ordinary seed among ~25 rather than a template-setter --
+    # consensus_template's unit rescaling is what keeps that true, and
+    # test_consensus_template_survives_high_amplitude_contamination is what pins
+    # it. The old fixture used 2.5 with no padding, so it was measuring the cell's
+    # contamination of the template it was then scored against.
     scattered = np.zeros((1, cn.shape[1]), dtype=np.float32)
-    scattered[0, 0:10:3] = 2.5
-    scattered[0, 10:20:3] = -2.5
+    scattered[0, 0:10:3] = 1.5
+    scattered[0, 10:20:3] = -1.5
     cn2 = np.vstack([cn, scattered])
     normal_mask2 = np.append(normal_mask, False)
     segments = _two_chrom_segments(cn2.shape[1])
@@ -406,3 +433,285 @@ def test_normal_pool_baseline_fallback_and_reuse():
     empty = np.zeros(cn.shape[0], dtype=bool)
     fb = _normal_pool_baseline(cn, empty)
     np.testing.assert_allclose(fb, np.median(cn, axis=0))
+
+
+# ── regression tests for the PR#2 review findings ─────────────────────────────
+
+def _segments_for(total, per_chr=10):
+    """Minimal segment table: `per_chr` segments per chromosome, equal gene counts."""
+    return pd.DataFrame({
+        "chr": [f"chr{i // per_chr + 1}" for i in range(total)],
+        "n_genes": [100] * total,
+    })
+
+
+def _cohort_with_artifacts(n_art, amp, n_seg=20, n_pad=40, seed=0):
+    """Bimodal cohort plus `n_art` anti-aligned cells at amplitude `amp`.
+
+    The artifacts carry the clone's profile with the sign flipped and a much
+    larger magnitude — the transcriptome-extreme cell (erythrocyte, platelet)
+    whose deviation is big but directionally unrelated to the tumor's CN.
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(
+        n_segments=n_seg, n_diploid_padding=n_pad, seed=seed,
+    )
+    rng = np.random.default_rng(seed + 7)
+    half = n_seg // 2
+    art = rng.normal(0.0, 0.05, size=(n_art, cn.shape[1]))
+    art[:, :half] -= amp
+    art[:, half:n_seg] += amp
+    cn = np.vstack([cn, art])
+    normal_mask = np.concatenate([normal_mask, np.zeros(n_art, dtype=bool)])
+    return cn, normal_mask
+
+
+@pytest.mark.parametrize("n_art,amp", [(1, 12.0), (3, 6.0), (10, 6.0)])
+def test_consensus_template_survives_high_amplitude_contamination(n_art, amp):
+    """A handful of transcriptome-extreme cells must not set the template's sign.
+
+    Seeds are chosen by burden, which selects FOR amplitude, so under a plain
+    mean over raw deviations the cells most able to flip the template are exactly
+    the ones the classifier exists to reject. Three anti-aligned cells at 12x the
+    clonal amplitude — 2.9% of the cohort — used to inverted the whole call:
+    every true tumor cell "normal", every artifact "tumor". Rescaling each seed to
+    unit norm makes it a vote rather than a veto.
+    """
+    cn, normal_mask = _cohort_with_artifacts(n_art, amp)
+    segments = _segments_for(cn.shape[1])
+    barcodes = [f"cell{i}" for i in range(cn.shape[0])]
+
+    df = classify_cells(
+        cn_matrix=cn, segments=segments, normal_mask=normal_mask,
+        barcodes=barcodes, discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+
+    # Planted tumor cells occupy rows 50..99; artifacts are appended after them.
+    assert (cls[50:100] == "tumor").sum() >= 45, (
+        f"{n_art} artifacts at amplitude {amp} hijacked the template: only "
+        f"{(cls[50:100] == 'tumor').sum()}/50 true tumor cells called tumor"
+    )
+    # The artifacts themselves anti-align, so they must not be called tumor.
+    assert (cls[100:] == "tumor").sum() == 0
+
+
+def test_consensus_template_is_scale_invariant_downstream():
+    """Template scale cancels in template_projection; only its shape matters."""
+    cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
+    w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+    tpl = consensus_template(dev, w)
+
+    np.testing.assert_allclose(
+        template_projection(dev, tpl, w),
+        template_projection(dev, tpl * 37.5, w),
+        rtol=1e-10,
+    )
+
+
+def test_consensus_template_excludes_low_complexity_seeds():
+    """Ambient cells are barred from seeding, not merely gated after the fact.
+
+    The low-complexity gate only downgrades a flagged cell's OWN call, which is
+    too late: burden selection concentrates noise-dominated ambient cells in the
+    seed set, where they steer everyone else's score.
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
+    w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+
+    # Three ambient-like rows with huge anti-aligned noise.
+    dev = dev.copy()
+    dev[:3] = -8.0 * dev[75]
+    exclude = np.zeros(dev.shape[0], dtype=bool)
+    exclude[:3] = True
+
+    clean = consensus_template(dev, w, exclude=exclude)
+    contaminated = consensus_template(dev, w)
+
+    # Excluded, the template aligns with the clone; included, it does not.
+    assert float(np.dot(clean, dev[75])) > 0
+    assert float(np.dot(clean, dev[75])) > float(np.dot(contaminated, dev[75]))
+
+
+def test_consensus_template_opposing_subclones_is_a_known_limitation():
+    """Two equal, exactly-opposing clones cancel — documented, not fixed.
+
+    consensus_template estimates ONE direction. Two high-burden subclones with
+    opposing profiles average toward zero here, so neither projects positively and
+    both are called normal. Resolving it needs multiple templates with
+    best-aligned scoring, which changes the scoring contract rather than the
+    estimator, and is deliberately out of scope for this change.
+
+    This test pins the CURRENT behaviour so the limitation is visible and so a
+    future multi-template change has something to flip. It is a bug with a
+    documented shape, not a property worth preserving.
+    """
+    rng = np.random.default_rng(1)
+    n_norm = n_a = n_b = 50
+    n_seg, n_pad = 20, 40
+    total = n_seg + n_pad
+    half = n_seg // 2
+    cn = rng.normal(0.0, 0.05, size=(n_norm + n_a + n_b, total))
+    cn[n_norm:n_norm + n_a, :half] += 0.6
+    cn[n_norm:n_norm + n_a, half:n_seg] -= 0.6
+    cn[n_norm + n_a:, :half] -= 0.6
+    cn[n_norm + n_a:, half:n_seg] += 0.6
+    normal_mask = np.array([True] * n_norm + [False] * (n_a + n_b))
+
+    df = classify_cells(
+        cn_matrix=cn, segments=_segments_for(total), normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+
+    # Neither clone is recovered. Asserted as the known limitation: what must NOT
+    # happen is the asymmetric outcome, where the template picks one clone's sign
+    # and silently calls the other clone's cells normal while calling the first
+    # tumor — that is the failure that hides a whole malignant population behind a
+    # confident-looking result.
+    called_a = (cls[n_norm:n_norm + n_a] == "tumor").sum()
+    called_b = (cls[n_norm + n_a:] == "tumor").sum()
+    assert abs(int(called_a) - int(called_b)) <= 5, (
+        f"asymmetric clone erasure: clone A {called_a}/50 tumor, "
+        f"clone B {called_b}/50 tumor"
+    )
+
+
+def test_low_purity_sample_still_recovers_tumor_cells():
+    """A rare tumor population must survive both the template and the fence.
+
+    Two ways to get this wrong, both measured during review: a per-segment MEDIAN
+    consensus needs the seed set to be majority-malignant and returns ~0 here; and
+    a fence measured on the GLOBAL IQR collapses when normals dominate and cuts
+    straight through the tumor mode (recall 1.00 -> 0.50 at 2.9% tumor fraction).
+    """
+    for n_tumor in (25, 6):
+        cn, normal_mask, _ = _bimodal_cn_matrix(
+            n_normal=200, n_tumor=n_tumor, n_segments=20, n_diploid_padding=40,
+        )
+        df = classify_cells(
+            cn_matrix=cn, segments=_segments_for(cn.shape[1]),
+            normal_mask=normal_mask,
+            barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+            discover_subclones_enabled=False,
+        )
+        recall = (df["class"].to_numpy()[200:] == "tumor").mean()
+        assert recall >= 0.9, f"tumor fraction {n_tumor}/{200 + n_tumor}: recall {recall}"
+
+
+def test_outlier_fence_does_not_cut_into_the_tumor_mode():
+    """The fence's activation guard must be stated in score units.
+
+    It used to be compared against clip_ceiling. Once that ceiling became a global
+    quantile the two were incommensurable — the fence is in reference-pool IQR
+    units — and the comparison silently stopped passing, disabling the exclusion
+    entirely. The guard now asks whether the fence sits above the bulk of the
+    non-reference population, which is the thing it must not cut into.
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
+    w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+    scores = template_projection(dev, consensus_template(dev, w), w)
+
+    df = gmm_classify(scores, normal_mask=normal_mask)
+    # A cleanly-separating score must not have its whole malignant population
+    # fenced to "normal" — the failure the old reference-relative fence produced
+    # whenever the guard did let it run.
+    assert (df["class"].to_numpy()[50:] == "tumor").sum() >= 45
+
+
+def test_gmm_classify_bounds_both_tails_of_a_signed_score():
+    """Winsorization is symmetric now that the score can go negative.
+
+    An unbounded negative tail lets a single anti-aligned cell claim the GMM's low
+    component, after which the ordinary normal and tumor modes share the high one.
+    """
+    rng = np.random.default_rng(0)
+    scores = np.concatenate([
+        rng.normal(0.0, 0.02, size=100),   # normals
+        rng.normal(0.5, 0.05, size=50),    # tumor
+        np.array([-40.0]),                 # one extreme anti-aligned cell
+    ])
+    normal_mask = np.array([True] * 100 + [False] * 51)
+
+    df = gmm_classify(scores, normal_mask=normal_mask)
+    cls = df["class"].to_numpy()
+
+    assert (cls[100:150] == "tumor").sum() >= 45, (
+        "the negative outlier displaced the tumor component"
+    )
+    # tumor_score is reported unmodified — winsorization is a fitting-time input
+    # transform, never a change to what is written out.
+    np.testing.assert_allclose(df["tumor_score"].to_numpy(), scores)
+
+
+def test_classify_cells_tolerates_empty_segmentation():
+    """detect_segments() legitimately returns zero rows; that must not crash.
+
+    No chromosome reaching min_seg_genes is a supported outcome. The per-cell
+    weighted median used to raise `argmax of an empty sequence` on the resulting
+    (n_cells, 0) matrix — a regression against the previous classifier, which
+    completed with all-zero scores.
+    """
+    empty = pd.DataFrame({
+        "chr": pd.Series([], dtype=str), "n_genes": pd.Series([], dtype=int),
+    })
+    df = classify_cells(
+        cn_matrix=np.zeros((10, 0)), segments=empty,
+        normal_mask=np.ones(10, dtype=bool),
+        barcodes=[f"cell{i}" for i in range(10)],
+        discover_subclones_enabled=False,
+    )
+    assert len(df) == 10
+    assert (df["class"].to_numpy() == "normal").all()
+    assert (df["tumor_score"].to_numpy() == 0).all()
+    assert (df["cn_burden"].to_numpy() == 0).all()
+
+
+def test_diploid_baseline_ranks_on_magnitude_not_signed_score():
+    """heatmap's recentering baseline must not select anti-aligned cells.
+
+    _confident_diploid_mask keeps normals at or below a score quantile. Under a
+    signed projection the MINIMUM is the most anti-aligned cell — one carrying a
+    large real event in the opposite direction — not the most diploid one. That
+    baseline feeds _recenter and propagates into the heatmap, the denoised matrix,
+    chr_cnv_matrix.csv, {sample}_clones.seg and the matched-bulk concordance.
+    """
+    from kopya.heatmap import _confident_diploid_mask
+
+    cn, normal_mask = _cohort_with_artifacts(10, 6.0)
+    segments = _segments_for(cn.shape[1])
+    df = classify_cells(
+        cn_matrix=cn, segments=segments, normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+    low_c = df["low_complexity"].to_numpy()
+
+    on_burden, _ = _confident_diploid_mask(cls, low_c, df["cn_burden"].to_numpy(), 0.5)
+    on_signed, _ = _confident_diploid_mask(cls, low_c, df["tumor_score"].to_numpy(), 0.5)
+
+    # Artifacts are rows 100+. Ranking on the signed score pulls them in (they are
+    # the most negative cells in the cohort); ranking on burden excludes them.
+    assert np.asarray(on_burden)[100:].sum() == 0
+    assert np.asarray(on_signed)[100:].sum() > 0
+
+
+def test_segment_burden_is_the_reported_cn_burden():
+    """cn_burden is exactly segment_burden over the shared deviation."""
+    cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
+    segments = _segments_for(cn.shape[1])
+    w = segments["n_genes"].to_numpy()
+
+    df = classify_cells(
+        cn_matrix=cn, segments=segments, normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+    np.testing.assert_allclose(
+        df["cn_burden"].to_numpy(), segment_burden(np.abs(dev), w), rtol=1e-12,
+    )

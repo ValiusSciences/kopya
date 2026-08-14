@@ -11,7 +11,8 @@ clustering.
 Consumes three artifacts written by `kopya run` into the out-dir:
     cn_per_segment.npz   dense (cells × segments) signal + cell_barcodes
     segments.parquet     segment table (chr, start_idx, end_idx, n_genes)
-    prediction.csv       per-cell class / subclone / tumor_score / low_complexity
+    prediction.csv       per-cell class / subclone / tumor_score / cn_burden /
+                         low_complexity
 
 Choosing what to display
 ------------------------
@@ -23,7 +24,8 @@ the panel read as noisy structure rather than a clean diploid baseline. So:
     * low_complexity cells (ambient) are dropped from the plot entirely.
     * the reference panel — and the baseline the whole figure is recentered
       against — is the *confident-diploid* subset: normal-called, non-junk cells
-      whose tumor_score is in the lower ``ref_score_quantile`` of that pool. This
+      whose ``cn_burden`` (CN magnitude, not the signed tumor_score) is in the
+      lower ``ref_score_quantile`` of that pool. This
       is kopya's unsupervised analogue of inferCNV's curated reference set, and
       it sharpens the observation panel too (the frame is a true diploid median).
 
@@ -243,7 +245,7 @@ def _genome_layout(segments):
 def _confident_diploid_mask(cls, low_c, score, ref_score_quantile):
     """Recentering-baseline mask: confident-diploid reference cells.
 
-    Non-low-complexity ``normal`` cells whose ``tumor_score`` is at or below the
+    Non-low-complexity ``normal`` cells whose CN magnitude is at or below the
     given quantile of that pool. **Always** excludes low-complexity cells, so a
     display toggle (``--show-low-complexity``) can never shift the baseline. When
     no score is available, all non-junk normals qualify.
@@ -251,7 +253,11 @@ def _confident_diploid_mask(cls, low_c, score, ref_score_quantile):
     Args:
         cls: per-cell class labels.
         low_c: per-cell low_complexity bool flags.
-        score: per-cell tumor_score, or None.
+        score: per-cell CN magnitude to rank on, or None. Must be NON-NEGATIVE,
+            i.e. ``cn_burden`` (or ``|tumor_score|``) — never the signed
+            ``tumor_score`` itself, whose minimum is the most anti-aligned cell
+            rather than the most diploid one. Callers pick the column; see
+            render_heatmap and cli's --denoise-outputs path.
         ref_score_quantile: keep normals at/below this quantile of the non-junk pool.
 
     Returns:
@@ -294,19 +300,24 @@ def reference_relative_signal(
         cls: per-cell class labels ('tumor'/'normal'/'uncertain'), len n_cells.
         low_complexity: per-cell bool flags (ambient cells never define the
             reference band); None treats every cell as non-low-complexity.
-        tumor_score: per-cell tumor_score (selects the lowest-signal normals as the
-            confident-diploid reference), or None to use every non-junk normal.
+        tumor_score: per-cell NON-NEGATIVE CN magnitude — ``cn_burden``, or
+            ``|tumor_score|`` for older prediction.csv files — used to select the
+            lowest-signal normals as the confident-diploid reference. None uses
+            every non-junk normal. Passing the raw signed ``tumor_score`` here is a
+            bug: its minimum is the most anti-aligned cell, so the baseline fills
+            with cells carrying a large real event in the opposite direction. (The
+            parameter keeps its historical name for callers that pass by keyword.)
         segments: detect_segments() table; ``n_genes`` weights the per-cell median.
         sd_amplifier: denoise strength in reference-spread units (0 disables denoise;
             higher whitens more aggressively, at the cost of weak-event signal).
-        ref_score_quantile: keep normals with tumor_score at/below this quantile of
-            the non-junk normal pool as the reference.
+        ref_score_quantile: keep normals with that magnitude at/below this quantile
+            of the non-junk normal pool as the reference.
 
     Returns:
         (rc, is_ref, thr):
             rc: (n_cells × n_segments) denoised signed signal.
             is_ref: bool mask of the confident-diploid reference cells.
-            thr: the tumor_score cutoff used to pick the reference (None if no score).
+            thr: the magnitude cutoff used to pick the reference (None if no score).
 
     Raises:
         ValueError: if no confident-diploid reference cell survives — without a
@@ -421,7 +432,8 @@ def render_heatmap(
             reference cells (see ``_denoise``).
         ref_score_quantile: the reference panel (and the recentering baseline) is
             the *confident-diploid* subset — normal-called, non-low-complexity
-            cells whose tumor_score is at or below this quantile of that pool.
+            cells whose ``cn_burden`` (CN magnitude, not the signed tumor_score)
+            is at or below this quantile of that pool.
             Excludes tumor cells the classifier under-called as normal (they carry
             real CNV) so the reference reads as a clean diploid baseline, the way
             inferCNV uses a curated reference. Default 0.5 (flattest half). 1.0
@@ -477,7 +489,21 @@ def render_heatmap(
     subclone = pred["subclone"].to_numpy().astype(str)
     low_c = (pred["low_complexity"].to_numpy().astype(bool)
              if "low_complexity" in pred.columns else np.zeros(len(pred), dtype=bool))
-    score = pred["tumor_score"].to_numpy() if "tumor_score" in pred.columns else None
+    # Rank candidate baseline cells on cn_burden — a non-negative magnitude — not on
+    # tumor_score, which is a SIGNED template projection whose minimum is the most
+    # anti-aligned cell rather than the most diploid one. Selecting the lowest signed
+    # scores hands _recenter a baseline built from cells carrying a large real event
+    # in the opposite direction to the consensus, and that frame then propagates into
+    # the heatmap, cn_per_segment_denoised.npz, chr_cnv_matrix.csv, {sample}_clones.seg
+    # and the matched-bulk concordance. Fall back to |tumor_score| for prediction.csv
+    # files written before cn_burden existed, which is the same ordering wherever the
+    # old score was non-negative anyway.
+    if "cn_burden" in pred.columns:
+        score = pred["cn_burden"].to_numpy()
+    elif "tumor_score" in pred.columns:
+        score = np.abs(pred["tumor_score"].to_numpy())
+    else:
+        score = None
 
     # Low-complexity (ambient) cells are dropped from the plot by default;
     # --show-low-complexity keeps them visible. Either way they NEVER define the

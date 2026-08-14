@@ -20,6 +20,7 @@ from click import BadParameter
 from click import Choice
 from click import Path as ClickPath
 from click import echo, group, option, version_option
+from numpy import abs as np_abs
 from numpy import asarray as np_asarray
 from numpy import median as np_median
 from numpy import savez_compressed
@@ -591,12 +592,19 @@ def run(
         from kopya.heatmap import reference_relative_signal
         low_c = (prediction_df["low_complexity"].to_numpy()
                  if "low_complexity" in prediction_df.columns else None)
+        # Rank baseline candidates on the non-negative magnitude, never on the
+        # signed tumor_score — whose minimum is the most ANTI-aligned cell, not the
+        # most diploid one. Same rule (and same fallback for older prediction.csv
+        # files) as heatmap.render_heatmap.
+        ref_rank = (prediction_df["cn_burden"].to_numpy()
+                    if "cn_burden" in prediction_df.columns
+                    else np_abs(prediction_df["tumor_score"].to_numpy()))
         try:
             rc, is_ref, _ = reference_relative_signal(
                 cn_matrix,
                 prediction_df["class"].to_numpy(),
                 low_c,
-                prediction_df["tumor_score"].to_numpy(),
+                ref_rank,
                 segments,
                 sd_amplifier=sd_amplifier,
             )
@@ -1023,9 +1031,10 @@ def find_inputs(patient_dir, sample, out_dir):
     default=0.5,
     show_default=True,
     help="The reference panel (and recentering baseline) is the confident-diploid "
-         "subset: non-junk normals with tumor_score at or below this quantile of "
-         "that pool. Excludes under-called tumor cells from the reference. 1.0 keeps "
-         "every non-junk normal.",
+         "subset: non-junk normals with cn_burden (the non-negative CN magnitude, "
+         "NOT the signed tumor_score) at or below this quantile of that pool. "
+         "Excludes under-called tumor cells from the reference. 1.0 keeps every "
+         "non-junk normal.",
 )
 @option(
     "--show-low-complexity",

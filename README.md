@@ -307,7 +307,8 @@ Different files center their values differently; this trips people up, so keep i
 | `cn_per_segment.npz` | natural-log signal (raw; re-center first) | `~0` after re-centering | **yes** |
 | `{sample}_clones.seg` `seg.mean` | natural-log ratio vs normal reference | `0` | **yes** |
 | `cn_per_segment_denoised.npz` (opt-in) | natural-log deviation, denoised | `0` | **yes** |
-| `prediction.csv` `tumor_score` | Σ \|deviation\| (within-run rank, not portable) | `~0` | no |
+| `prediction.csv` `tumor_score` | signed consensus-template projection, in log-deviation amplitude units (within-run rank, not portable) | `~0` | **yes** |
+| `prediction.csv` `cn_burden` | gene-weighted mean \|deviation\| across the genome (within-run rank, not portable) | `~0` | no |
 
 #### Denoised outputs: scope and rationale
 
@@ -360,14 +361,17 @@ The intended per-cell call is the **`class`** column (`tumor` / `normal` / `unce
 |--------|---------|----------------|
 | `class` | Tumor / normal / uncertain call from the 2-component GMM on `tumor_score` | The call. `uncertain` = GMM posterior below `--call-confidence` (default 0.5); filter these out for clean downstream analysis |
 | `confidence` | Max GMM posterior in `[0, 1]` | How sure the call is. Cells near 0.5 are genuinely ambiguous; sort tumor calls by this to find borderline ones |
-| `tumor_score` | Per-cell L1 distance: the **sum** of absolute per-segment CN deviations from the normal-pool baseline (log-space) | Higher = more aneuploidy burden. See caveat below |
+| `tumor_score` | **Signed** alignment between the cell's CN deviation and this sample's own consensus CN profile, gene-count weighted (log-space) | Higher = deviating *with* the clone. `~0` = no CN. **Negative = deviating against it**, which is a transcriptional outlier, not a "very normal" cell. See caveat below |
+| `cn_burden` | Non-negative magnitude companion: gene-count-weighted mean \|per-segment deviation\| across the genome | "How much CN does this cell carry", direction ignored. Rank on this — not on `tumor_score` — when you want the cells *closest to diploid* |
 | `n_segments_altered` | Count of segments deviating >0.2 log-units from baseline | Often more interpretable than `tumor_score`: "how much of the genome is rearranged" rather than a magnitude. A real tumor cell lights up many segments; a high score from one or two noisy focal events will have a low count here |
 | `subclone` | Leiden cluster among tumor cells (`subclone_1…`, `""` for non-tumor) | Largest clone is `subclone_1`; capped at `--max-subclones` (default 5) |
 | `low_complexity` | bool: ambient / empty-droplet-like cell (few detected genes) | Flagged, never silently dropped. A tumor call on such a cell is untrustworthy (noise-dominated CN signal), so the classifier downgrades it to `uncertain`. Filter these out for a clean tumor set |
 
 **On `uncertain` (flag, don't force).** Two gates downgrade untrustworthy `tumor` calls to `uncertain` rather than asserting them: the **low-complexity** gate (above) and a **coherence** gate, where a high score built from scattered, single-segment spikes rather than contiguous chromosome-arm-scale runs is more likely a transcriptionally-"loud" normal cell than copy number. Both gates are *subtractive* (they never promote a cell to tumor), so they cannot inflate the tumor set. Genuinely ambiguous cells, including same-lineage normals whose expression mimics CNV (e.g. normal astrocytes vs AC-like glioma, which expression-only CNV cannot separate), land in `uncertain` by design. `n_uncertain` and `n_low_complexity` are recorded in `qc.json`.
 
-**Caveat on `tumor_score`:** it is a *sum* across segments, so its absolute magnitude scales with the number of segments (`n_segments` in `qc.json`) and the strength of the CN signal. There is **no fixed unit or universal cutoff**; a value is only meaningful *relative to other cells in the same run*. Normal cells sit near 0 (or a low baseline) and tumor cells form a separate higher cluster, but the actual numbers (e.g. a tumor cluster at 5-40) are **not comparable across samples**. For any cross-sample comparison, rely on `class` / `confidence` or `n_segments_altered` instead of the raw score.
+**Caveat on `tumor_score`:** it is *genome-fraction weighted and normalized*, so unlike a raw sum it does not scale with the number of segments (`n_segments` in `qc.json`). It does scale with the amplitude of the sample's own consensus profile: a cell carrying the full consensus scores roughly the consensus's own mean |deviation|, so a sample with ±0.5 events puts its tumor mode near 0.5 and a sample with ±0.2 events near 0.2. There is still **no fixed unit or universal cutoff**; a value is only meaningful *relative to other cells in the same run*. Normal cells sit near 0 and tumor cells form a separate higher cluster, but the numbers are **not comparable across samples**. For any cross-sample comparison, rely on `class` / `confidence` or `n_segments_altered` instead of the raw score.
+
+**The score is signed, and the sign matters.** The two ends of the range are not "most tumor" and "most normal" — they are "aligned with the clone" and "aligned against it". A strongly negative cell has a *large* real deviation pointing the opposite way, which usually means a transcriptionally extreme cell type (erythrocytes, platelets), not a confidently diploid one. Cells closest to diploid sit near **zero**, not at the minimum. If you are selecting a diploid reference set, rank on `cn_burden` (or `|tumor_score|`), never on `tumor_score` itself.
 
 A good triage filter is to cross-tab `tumor_score` against `n_segments_altered`: confident tumor cells score high on *both*, while a high score with few altered segments usually signals a noisy or transcriptionally extreme cell rather than a true malignant one.
 

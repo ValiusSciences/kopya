@@ -1,19 +1,29 @@
 """Step §3.5 — classify cells as tumor/normal/uncertain and discover subclones.
 
 Three steps:
-    1. compute_tumor_scores(): per-cell L1 distance from the normal-pool median
-       across the per-segment CN matrix. Cells with no CN deviation score near 0;
-       cells with large amp/del events score high.
+    1. scoring, in three parts: reference_relative_deviation() recovers the
+       per-cell/per-segment deviation (per-segment normal-pool median, then the
+       cell's own gene-count-weighted genome-wide median); consensus_template()
+       estimates this sample's CN profile label-free from its most-aneuploid
+       cells; template_projection() scores each cell by its SIGNED alignment with
+       that template. Cells with no CN score near 0, cells carrying the clone's
+       events score positive, cells deviating against it score negative.
+
+       compute_tumor_scores() computes the older non-negative magnitude burden
+       over the same deviation. It is no longer on the classify_cells() path —
+       classify_cells inlines deviation -> template -> projection — but remains
+       exported and supported for callers that want the magnitude directly; it is
+       the same quantity now reported as the ``cn_burden`` column.
 
     2. gmm_classify(): 2-component Gaussian Mixture on the tumor-score vector.
        Higher-mean component = tumor; lower = normal. Posterior probabilities
        below --call-confidence (default 0.5) collapse to the "uncertain" label
        so downstream notebooks can filter them out cleanly.
 
-    3. discover_subclones(): Leiden clustering on the per-cell × per-segment CN
-       matrix, restricted to tumor cells. Resolution is data-driven via a
-       sweep, capped at max_subclones (default 5) to keep the clone-tree
-       interpretable.
+    3. discover_subclones(): Leiden clustering on the per-cell × per-segment
+       reference-relative deviation, restricted to tumor cells. Resolution is
+       data-driven via a sweep, capped at max_subclones (default 5) to keep the
+       clone-tree interpretable.
 
 classify_cells() composes the three into a single per-cell DataFrame.
 """
@@ -67,14 +77,6 @@ DEFAULT_CALL_CONFIDENCE = 0.5
 # leaving more strong-signal tumor cells inside the GMM fit where their
 # score can earn a tumor call on its own merits.
 DEFAULT_OUTLIER_FENCE_MULT = 12.0
-
-# Floor multiplier for the global-median-based clip ceiling guard.
-# clip_ceiling is clamped to at least CLIP_FLOOR_MULT × global_median so
-# the ceiling never falls below the true tumor signal in high-tumor-fraction
-# samples (where most cells are malignant and pull the global median up).
-# 1.24 is slightly more permissive than the original 1.2, which prevents
-# over-clipping in datasets where the tumor signal is moderate.
-DEFAULT_CLIP_FLOOR_MULT = 1.24
 
 # Maximum number of subclones to emit. Capping keeps the per-clone .seg file
 # interpretable and matches CopyKAT's typical post-hoc dendrogram cut at k<=5.
@@ -140,20 +142,43 @@ def weighted_median_rows(mat, weights):
     the same definition or the classifier and the figures disagree about where
     diploid sits.
 
+    Computed in row blocks rather than over the whole matrix at once. The
+    calculation needs three (n_rows × n_cols) intermediates — an int64 ``order``,
+    the reordered values, and a float64 cumulative weight — so a whole-matrix
+    version costs ~8x the input in temporaries: at the 800k cells x 500 segments
+    this package documents as commodity-memory-safe that is roughly 8 GB, plus a
+    cumsum temporary, on a path both the classifier and the heatmap now take. The
+    block loop caps the intermediates at ~64 MB each while keeping every inner
+    operation vectorized; results are identical (blocks are independent — the
+    weighted median is per-row).
+
     Args:
         mat: (n_rows × n_cols) ndarray.
         weights: (n_cols,) non-negative column weights.
 
     Returns:
-        (n_rows,) ndarray of per-row weighted medians.
+        (n_rows,) ndarray of per-row weighted medians. All-zero when there are no
+        columns — detect_segments() legitimately returns zero rows when no
+        chromosome reaches min_seg_genes, and an empty argmax would otherwise
+        raise on an input the pipeline is documented to tolerate.
     """
-    order = argsort(mat, axis=1)
-    sorted_vals = take_along_axis(mat, order, axis=1)
-    cumw = cumsum(asarray(weights, dtype="float64")[order], axis=1)
-    half = 0.5 * float(asarray(weights, dtype="float64").sum())
-    # First position whose cumulative weight reaches the halfway mark.
-    idx = argmax(cumw >= half, axis=1)
-    return sorted_vals[arange(mat.shape[0]), idx]
+    n_rows, n_cols = mat.shape
+    if n_cols == 0:
+        return zeros(n_rows, dtype="float64")
+    w = asarray(weights, dtype="float64")
+    half = 0.5 * float(w.sum())
+    out = zeros(n_rows, dtype="float64")
+    # ~8M float64 per intermediate == 64 MB per block, whatever the segment count.
+    block = max(1, int(8_000_000 // n_cols))
+    for start in range(0, n_rows, block):
+        chunk = mat[start:start + block]
+        order = argsort(chunk, axis=1)
+        sorted_vals = take_along_axis(chunk, order, axis=1)
+        cumw = cumsum(w[order], axis=1)
+        # First position whose cumulative weight reaches the halfway mark.
+        idx = argmax(cumw >= half, axis=1)
+        out[start:start + block] = sorted_vals[arange(chunk.shape[0]), idx]
+    return out
 
 
 def _normal_pool_baseline(cn_matrix, normal_mask):
@@ -386,23 +411,71 @@ def segment_burden(deviations, seg_weights=None):
     if seg_weights is None:
         return deviations.sum(axis=1)
     w = asarray(seg_weights, dtype="float64")
-    return (deviations * w).sum(axis=1) / w.sum()
+    total = float(w.sum())
+    if total <= 0.0:
+        # No segments (or all zero-gene): nothing to average over. Zero burden is
+        # the honest answer and keeps the empty-segmentation path warning-free.
+        return zeros(deviations.shape[0], dtype="float64")
+    return (deviations * w).sum(axis=1) / total
 
 
-def consensus_template(dev, seg_weights=None, seed_quantile=DEFAULT_TEMPLATE_SEED_QUANTILE):
+def consensus_template(
+    dev, seg_weights=None, seed_quantile=DEFAULT_TEMPLATE_SEED_QUANTILE, exclude=None,
+):
     """The sample's own consensus CN profile, estimated without any labels.
 
     A per-segment template of "what this sample's copy-number alterations look
-    like", built in two passes over the same deviation matrix:
+    like", built in three passes over the same deviation matrix:
 
       1. score every cell by its label-free aneuploidy burden (``segment_burden``);
-      2. average the deviation over the most-aneuploid ``1 - seed_quantile``
-         fraction of cells.
+      2. take the most-aneuploid ``1 - seed_quantile`` fraction of cells as seeds
+         and rescale each one to unit weighted-L1 norm;
+      3. average those unit directions.
 
     Real CNVs are shared by a clonal population, so they survive that average;
     per-cell transcriptional noise is independent between cells and averages away.
     The result is a noisy but unbiased estimate of the malignant population's CN
     profile.
+
+    Step 2 — the unit rescaling — is what keeps a seed's *direction* independent
+    of its *magnitude*, and it is load-bearing rather than cosmetic. Seeds are
+    selected by burden, which selects for amplitude, so under a plain mean over
+    raw deviations the cells most able to set the template's sign are the
+    transcriptome-extreme ones this classifier exists to reject. Measured on a
+    50-reference/50-tumor synthetic with a clonal event at ±0.5: three anti-aligned
+    cells at amplitude 6.0 (2.9% of the cohort) invert the raw-mean template
+    outright — gain block +0.510 -> -0.239, loss block -0.500 -> +0.254 — after
+    which all 50 true tumor cells are called ``normal`` and the three artifacts are
+    called ``tumor``. Rescaled to unit norm those three cells cast three votes out
+    of twenty-six and the template holds.
+
+    The protection is a majority argument over the SEED SET, not over the cohort,
+    so it has an exact bound: extreme cells sort to the top of the burden ranking
+    and therefore enter the seed set first, so they outvote the clone once they
+    exceed half of it — ``0.5 * (1 - seed_quantile)`` = 12.5% of the cohort at the
+    default quantile. Measured on the synthetic above, the template holds at 11.5%
+    contamination and inverts at 12.3%. Beyond that no label-free single-template
+    estimator can tell which direction is the malignant one; the outlier fence in
+    ``gmm_classify`` is the layer meant to remove such cells before they get here.
+
+    A mean over unit directions rather than a per-segment median, because the
+    median additionally requires the seed set to be majority-malignant. On a
+    low-purity sample the top burden quartile can be minority-tumor, and an
+    aligned minority still sums coherently under a mean while independent noise
+    directions cancel — so the mean degrades gracefully where the median would
+    return ~0 and call the sample flat.
+
+    Note the template's overall scale is irrelevant downstream:
+    ``template_projection`` divides by ``sum |w t|``, so scaling the template by
+    any positive constant leaves every score unchanged. Only its shape matters.
+
+    Known limitation: this estimates ONE consensus direction. Two high-burden
+    subclones carrying opposing profiles cancel here — at equal population size
+    the template collapses toward zero, and an unequal minority clone projects
+    negative and is called normal. See
+    test_consensus_template_opposing_subclones_is_a_known_limitation. Resolving it
+    needs multiple templates with best-aligned scoring, which is a scoring-contract
+    change rather than an estimator fix and is deliberately not attempted here.
 
     Deliberately does NOT use ``normal_mask`` or ``segments.tumor_mean``, both of
     which are available here. ``tumor_mean`` is the pooled mean over the
@@ -418,29 +491,60 @@ def consensus_template(dev, seg_weights=None, seed_quantile=DEFAULT_TEMPLATE_SEE
         dev: (n_cells × n_segments) reference-relative deviation.
         seg_weights: (n_segments,) per-segment gene counts.
         seed_quantile: burden quantile above which a cell seeds the template.
+        exclude: optional bool mask len == n_cells of cells barred from seeding.
+            Ambient / empty-droplet-like cells belong here: their CN signal is
+            noise-dominated, that noise is large in magnitude, and burden
+            selection therefore concentrates them in exactly the set that sets the
+            template's direction. Ignored if it would leave no eligible cells.
 
     Returns:
         (n_segments,) float array: the consensus per-segment deviation.
     """
+    if dev.shape[1] == 0:
+        return zeros(0, dtype="float64")
+    eligible = ones(dev.shape[0], dtype=bool)
+    if exclude is not None:
+        candidate = ~asarray(exclude, dtype=bool)
+        if candidate.any():
+            eligible = candidate
     burden = segment_burden(np_abs(dev), seg_weights)
-    thr = float(percentile(burden, 100.0 * seed_quantile))
-    seed = burden >= thr
+    thr = float(percentile(burden[eligible], 100.0 * seed_quantile))
+    seed = eligible & (burden >= thr)
     # Degenerate guard: an exactly-constant burden makes the threshold equal the
     # maximum and could select nothing. Fall back to the whole cohort, which gives
     # a ~zero template and hence ~zero scores — the honest answer for a sample
     # with no detectable CN structure.
     if not seed.any():
-        seed = ones(dev.shape[0], dtype=bool)
-    return dev[seed].mean(axis=0)
+        seed = eligible
+    seeds = asarray(dev[seed], dtype="float64")
+    # Rescale each seed to unit weighted-L1 norm so it votes on direction only.
+    # Same aggregation as the burden that selected it, so "one unit of deviation"
+    # means the same thing in both places.
+    norms = segment_burden(np_abs(seeds), seg_weights)
+    keep = norms > 0
+    if not keep.any():
+        # Every seed is exactly diploid — no direction to estimate.
+        return zeros(dev.shape[1], dtype="float64")
+    return (seeds[keep] / norms[keep][:, None]).mean(axis=0)
 
 
 def template_projection(dev, template, seg_weights=None):
     """Per-cell signed alignment with the consensus CN template.
 
-    ``sum_s w_s t_s dev_is / sum_s |w_s t_s|`` — a gene-count-weighted projection,
-    normalized so a cell carrying the full consensus profile scores ~1, a cell
-    with no CN scores ~0, and a cell deviating opposite to the consensus scores
-    negative.
+    ``sum_s w_s t_s dev_is / sum_s |w_s t_s|`` — a gene-count-weighted projection.
+    A cell with no CN scores ~0 and a cell deviating opposite to the consensus
+    scores negative.
+
+    Units: the denominator is the weighted L1 norm of the template, not its
+    squared norm, so this is NOT a dimensionless projection coefficient. For
+    ``dev == template`` it returns the weight-mean of ``|t|`` — a template whose
+    events sit at ±0.5 gives 0.5, one at ±2.0 gives 2.0. The score therefore reads
+    in **deviation-amplitude units**: "how far, in log-ratio, does this cell move
+    along the consensus direction". That is the useful scale here — it stays
+    comparable to the ``cn_burden`` magnitude and to the 0.2 threshold
+    ``n_segments_altered`` uses — but it does mean a fixed numeric cutoff is not
+    portable between samples whose consensus amplitudes differ. Divide by
+    ``sum_s w_s t_s^2`` instead if a true unit-normalized coefficient is wanted.
 
     Why this rather than the magnitude burden it replaces: the burden is
     ``sum |dev|``, which counts every departure from the reference as evidence of
@@ -480,12 +584,13 @@ def gmm_classify(
     normal_mask=None,
     confidence_threshold=DEFAULT_CALL_CONFIDENCE,
     outlier_fence_mult=DEFAULT_OUTLIER_FENCE_MULT,
-    clip_floor_mult=DEFAULT_CLIP_FLOOR_MULT,
 ):
     """Fit a 2-component GMM on the tumor-score vector and call each cell.
 
     Args:
-        scores: 1-D ndarray of per-cell tumor scores from compute_tumor_scores().
+        scores: 1-D ndarray of per-cell tumor scores. On the classify_cells path
+            this is the signed template_projection(); any monotone per-cell
+            discriminant works, and it may be negative.
         normal_mask: Optional bool array; when supplied, cells flagged as
             confident-normal upstream remain "normal" regardless of GMM
             output. Without this, signature/supervised confidence is lost
@@ -493,25 +598,24 @@ def gmm_classify(
             cluster when the score happens to be middling.
         confidence_threshold: Cells with max posterior below this become
             "uncertain" rather than a hard tumor/normal call.
-        outlier_fence_mult: Multiplier on the baseline IQR to define the
+        outlier_fence_mult: Multiplier on the reference pool's IQR to define the
             outlier exclusion fence. Non-baseline cells scoring above
             Q75 + outlier_fence_mult * IQR are excluded from GMM fitting
             and forced to "normal". This prevents transcriptomically extreme
             cell types (Erythrocytes, Platelets) — whose high scores reflect
             transcriptome mismatch rather than CNV — from contaminating the
-            GMM and displacing the true tumor signal.
-        clip_floor_mult: **No longer consulted.** It was the floor multiplier on
-            the global score median that guarded the old reference-relative clip
-            ceiling against over-clipping high-tumor-fraction samples. The ceiling
-            is now a global tail quantile, which cannot over-clip in that way, so
-            the guard has nothing to do. Kept in the signature so existing callers
-            and the CLI keep working unchanged.
+            GMM and displacing the true tumor signal. See the activation guard
+            below: the fence only applies when it sits above the bulk of the
+            non-reference population, and it is effectively untuned because the
+            guard it shipped with never passed.
 
     Returns:
         DataFrame with columns:
             class: str in {tumor, normal, uncertain}.
             confidence: float in [0, 1] (max GMM posterior).
-            tumor_score: float (the per-cell L1 score that drove the call).
+            tumor_score: float — the input score, unmodified. Winsorization
+                applies to the GMM's fitting input only, never to what is
+                reported, so the returned value is always the caller's own score.
     """
     # Winsorize scores before GMM fitting to neutralise transcriptional outliers.
     # Rare cell types (e.g. Erythrocytes, Dendritic cells) can have extremely
@@ -520,80 +624,99 @@ def gmm_classify(
     # displacing the TRUE tumor cluster (moderately elevated scores) into the
     # "normal" component.
     #
-    # Strategy: if a normal_mask is available, use those known-normal cells to
-    # define the "baseline score distribution". Use the stricter of:
-    #   - Baseline Q90 (the 90th percentile of normal-pool scores)
-    #   - Baseline Q75 + 1.5*IQR (Tukey fence for outlier removal)
-    # This bounds the GMM fitting range without losing the tumor signal.
-    # Also ensure the clip ceiling doesn't fall below 1.2x the global median
-    # (to avoid over-clipping in high-tumor-fraction samples).
-    # Without a normal_mask, fall back to the global 99th percentile.
-    if normal_mask is not None and asarray(normal_mask, dtype=bool).sum() >= 10:
-        nm = asarray(normal_mask, dtype=bool)
+    # Winsorization bounds: the 1st and 99th percentiles of the WHOLE score
+    # distribution. Computed once, unconditionally — both branches below used to
+    # arrive at the same global-P99 ceiling by different routes.
+    #
+    # The ceiling used to be reference-relative (min(refQ90, refQ75 + 1.5*refIQR),
+    # floored at clip_floor_mult * global median), i.e. "just above where the
+    # reference cells sit". That has the wrong sign of dependence: the
+    # winsorization exists to stop a handful of transcriptome-extreme cells from
+    # dragging the GMM's components, so it should bound the extreme TAIL — but
+    # pinning it to the reference spread instead bounds the tumor population
+    # itself, and does so more tightly the better the score gets. A score that
+    # separates the classes cleanly has, by construction, a tight reference
+    # distribution, so refQ90 lands far below the tumor mode and the entire
+    # malignant population collapses onto one value before the GMM ever sees it.
+    # Measured on this repo's benchmark cohort: 46-91% of true tumor cells clipped
+    # to the ceiling under a signed projection score (0.8-66% under the old
+    # magnitude score) — i.e. the defect scaled up exactly as the upstream signal
+    # improved.
+    #
+    # A global tail quantile has no such coupling: it always bounds ~1% of cells
+    # whatever the score's dynamic range.
+    #
+    # BOTH tails are bounded, because the score is signed. template_projection
+    # scores an anti-aligned cell at roughly minus its deviation magnitude, so
+    # against a template of amplitude ~0.1 a cell with |dev| ~ 1.5 lands at -1.5
+    # versus a tumor mode of +0.1 — a 15x tail, and erythrocytes/platelets
+    # anti-align about half the time. Leaving it open lets one such cell claim the
+    # GMM's low component outright, after which the ordinary normal and tumor modes
+    # share the high component and non-reference normals are called tumor. A
+    # quantile floor (rather than a hard floor at 0) bounds that tail without
+    # collapsing it onto a single point mass.
+    clip_ceiling = float(percentile(scores, 99))
+    clip_floor = float(percentile(scores, 1))
+    nm = asarray(normal_mask, dtype=bool) if normal_mask is not None else None
+
+    # Outlier detection: non-baseline cells scoring far above the bulk of the
+    # distribution are likely transcriptome-mismatch cells (Erythrocytes,
+    # Platelets), not CNV-driven. Exclude them from GMM fitting and lock them to
+    # "normal" in the output.
+    #
+    # The fence is a Tukey fence on the REFERENCE POOL's spread — "far above where
+    # cells known to be diploid sit" — which is the only spread here that estimates
+    # the normal mode's width without depending on how much tumor the sample holds.
+    #
+    # It needs an activation guard, because "far above the normal mode" is also
+    # true of every genuine tumor cell; without one, a cleanly-separating score
+    # locks the whole malignant population to "normal" (100/100 on a synthetic with
+    # a clean clonal gain+loss). The guard that shipped compared the fence to
+    # ``clip_ceiling``, and once that ceiling moved to a global quantile the two
+    # were no longer in the same units: the fence is measured in reference-pool IQR,
+    # which shrinks as the score's noise is removed, so the comparison silently
+    # stopped passing. Measured on that same synthetic, fence 0.146 vs ceiling 0.493
+    # at the shipped multiplier — the exclusion never ran at all. That made this
+    # protection unreachable on any supervised run whose score separates, and made
+    # commit 72d4a8c's 7.0 -> 12.0 widening a no-op, which is the real reason it
+    # "saturated" rather than any property of the cohort.
+    #
+    # The guard is now stated in score units against the quantity it is actually
+    # trying to protect: fence the tail only when the fence sits ABOVE the bulk of
+    # the non-reference population, so it cannot cut into the tumor mode. Both sides
+    # are per-cell scores, so the comparison means something at any dynamic range.
+    #
+    # A global-IQR fence was tried instead and is worse, not better: on a low-purity
+    # sample the global IQR is dominated by normals and collapses, so the fence cuts
+    # straight through the tumor mode (measured: recall 1.00 -> 0.50 at 2.9% tumor
+    # fraction). The reference pool is the right population to measure; the guard is
+    # the part that was broken.
+    #
+    # NOTE for re-validation: because the old guard never passed, this fence has
+    # effectively never run on the benchmark cohort, at any multiplier. It stays
+    # inert on both synthetics above under the new guard. ``outlier_fence_mult`` is
+    # therefore an untuned parameter, not a settled one — and note the fence runs
+    # inside gmm_classify, i.e. AFTER consensus_template has already been estimated,
+    # so it structurally cannot protect the template from the cells it excludes.
+    # Seed-set robustness has to live in consensus_template itself, which is where
+    # the unit-norm rescaling and the low-complexity exclusion now are.
+    if nm is not None and nm.sum() >= 10:
         baseline_s = scores[nm]
         bq75 = float(percentile(baseline_s, 75))
         bq25 = float(percentile(baseline_s, 25))
-        biqr = bq75 - bq25
-        # Winsorization ceiling: the 99th percentile of the WHOLE score
-        # distribution — the same rule the no-normal-mask branch below already
-        # applies, now used in both.
-        #
-        # It used to be a reference-relative ceiling
-        # (min(refQ90, refQ75 + 1.5*refIQR), floored at clip_floor_mult * global
-        # median), i.e. "just above where the reference cells sit". That has the
-        # wrong sign of dependence: the winsorization exists to stop a handful of
-        # transcriptome-extreme cells from dragging the GMM's components, so it
-        # should bound the extreme TAIL — but pinning it to the reference spread
-        # instead bounds the tumor population itself, and does so more tightly the
-        # better the score gets. A score that separates the classes cleanly has, by
-        # construction, a tight reference distribution, so refQ90 lands far below
-        # the tumor mode and the entire malignant population collapses onto one
-        # value before the GMM ever sees it. Measured on this repo's benchmark
-        # cohort: 46-91% of true tumor cells clipped to the ceiling under a signed
-        # projection score (0.8-66% under the old magnitude score) — i.e. the
-        # defect scaled up exactly as the upstream signal improved.
-        #
-        # A global tail quantile has no such coupling: it always bounds ~1% of
-        # cells whatever the score's dynamic range.
-        clip_ceiling = float(percentile(scores, 99))
-
-        # Outlier detection: non-baseline cells scoring well above the baseline
-        # distribution (> outlier_fence_mult * IQR above Q75) are likely
-        # transcriptome-mismatch cells, not CNV-driven. Exclude them from
-        # GMM fitting and lock them to "normal" in the output.
-        #
-        # Guard: only apply outlier exclusion when the fence is above the
-        # clip ceiling. When fence <= clip_ceiling, the outlier fence is
-        # tighter than the clip (typical of very homogeneous baselines with
-        # small IQR). In that case the fence would incorrectly exclude
-        # legitimate high-scoring tumor cells. The clip itself already handles
-        # the compression needed for GMM stability.
-        #
-        # NOTE: this fence shares the reference-relative scaling problem described
-        # above — it is measured in units of the reference pool's own IQR, which
-        # shrinks as the score's noise is removed, so a cleanly-separating score is
-        # the case it misfires on. On a synthetic sample with a clean clonal
-        # gain+loss it locks 100/100 true tumor cells to "normal". It happens to be
-        # inert on this repo's benchmark cohort (0 cells fenced at the shipped
-        # multiplier of 12.0, which is why widening it further saturated), so it is
-        # left alone here rather than changed on evidence this cohort cannot
-        # provide.
-        outlier_fence = bq75 + outlier_fence_mult * biqr
-        if outlier_fence > clip_ceiling:
+        outlier_fence = bq75 + outlier_fence_mult * (bq75 - bq25)
+        # The bulk of the non-reference population. Fencing below this would be
+        # cutting into whatever tumor mode the sample has.
+        non_ref = scores[~nm]
+        tumor_bulk = float(median(non_ref)) if non_ref.size else float("inf")
+        if outlier_fence > tumor_bulk:
             outlier_mask = (~nm) & (scores > outlier_fence)
         else:
-            outlier_mask = asarray([False] * len(scores), dtype=bool)
+            outlier_mask = zeros(len(scores), dtype=bool)
     else:
-        clip_ceiling = float(percentile(scores, 99))
-        nm = asarray(normal_mask, dtype=bool) if normal_mask is not None else None
-        outlier_mask = asarray([False] * len(scores), dtype=bool)
+        outlier_mask = zeros(len(scores), dtype=bool)
 
-    # Winsorize the TOP only. The lower bound is left open because the score is
-    # signed (a cell deviating opposite to the consensus scores below 0), and a
-    # hard floor at 0 would collapse that whole tail onto one value and hand the
-    # GMM a spurious point mass. For a non-negative score this is identical to
-    # the previous clip(scores, 0, ceiling).
-    scores_for_fit = clip(scores, None, clip_ceiling)
+    scores_for_fit = clip(scores, clip_floor, clip_ceiling)
 
     # Exclude outlier cells from GMM fitting; they do not represent the
     # tumor/normal distribution we want to learn.
@@ -794,7 +917,20 @@ def classify_cells(
         A DataFrame indexed by barcode with columns:
             class: str in {tumor, normal, uncertain}.
             confidence: float in [0, 1].
-            tumor_score: float.
+            tumor_score: float — the SIGNED consensus-template projection that
+                drove the call. Positive = deviating with this sample's consensus
+                CN profile, ~0 = no CN, negative = deviating against it. This is
+                the discriminant, so it is what a ROC/AUC over the call should be
+                computed on.
+            cn_burden: float >= 0 — gene-count-weighted mean |deviation| across
+                the genome. The magnitude companion to tumor_score, and the column
+                to rank on when the question is "how close to diploid is this
+                cell" rather than "how tumor-like". Kept separate rather than
+                folding one into the other because the two orderings genuinely
+                disagree: under the signed score the MINIMUM is the most
+                anti-aligned cell, not the most diploid one, so a consumer picking
+                a diploid baseline by lowest tumor_score selects cells carrying a
+                large real event in the opposite direction.
             subclone: str ("subclone_1"... or "" for non-tumor).
             n_segments_altered: int — count of segments where the cell's CN
                 deviates from the normal-pool median by more than 0.2 (~roughly
@@ -814,11 +950,23 @@ def classify_cells(
     dev = reference_relative_deviation(
         cn_matrix, normal_mask, baseline=baseline, seg_weights=seg_weights,
     )
+    # Ambient / empty-droplet-like cells, computed BEFORE the template so they can
+    # be barred from seeding it. Their CN signal is noise-dominated and large in
+    # magnitude, so burden-based seed selection concentrates them in exactly the set
+    # that sets the template's direction; the gate further down only downgrades
+    # their own calls, which is too late to protect everyone else's score.
+    low_complexity = _low_complexity_mask(complexity, low_complexity_frac, cn_matrix.shape[0])
+
     # Signed alignment with the sample's own consensus CN profile, rather than
     # the magnitude of any departure from the reference (see
     # template_projection for why direction is the discriminating part).
-    template = consensus_template(dev, seg_weights)
+    template = consensus_template(dev, seg_weights, exclude=low_complexity)
     scores = template_projection(dev, template, seg_weights)
+    # Non-negative companion to the signed score: the gene-weighted L1 burden, in
+    # the same per-cell-centered frame. This is what "how much CN does this cell
+    # carry" means when direction is not the question — see the cn_burden note in
+    # the Returns block above for why the two cannot be the same column.
+    cn_burden = segment_burden(np_abs(dev), seg_weights)
     call_df = gmm_classify(
         scores,
         normal_mask=normal_mask,
@@ -829,8 +977,8 @@ def classify_cells(
     gated = full(cn_matrix.shape[0], False)
 
     # ── gates: downgrade untrustworthy tumor calls to "uncertain" ─────────
-    # low-complexity (ambient) gate — only when complexity is supplied.
-    low_complexity = _low_complexity_mask(complexity, low_complexity_frac, cn_matrix.shape[0])
+    # low-complexity (ambient) gate — only when complexity is supplied. The mask
+    # itself was computed above, before the template.
     lc_gate = (labels == "tumor") & low_complexity
     labels[lc_gate] = "uncertain"
     gated |= lc_gate
@@ -858,8 +1006,14 @@ def classify_cells(
     # ── subclone discovery ───────────────────────────────────────────────
     tumor_mask = labels == "tumor"
     if discover_subclones_enabled:
+        # Cluster the reference-relative deviation, not the raw matrix. The raw
+        # per-segment CN still carries the per-cell depth pedestal — 50-90% of its
+        # L1 on this repo's benchmark cohort, correlating with detected-gene count
+        # at up to r=+0.88 within cells that have no CN at all — so PC1 of the raw
+        # matrix is substantially library depth and the emitted subclone_N labels
+        # would be depth strata rather than clones.
         subclones = discover_subclones(
-            cn_matrix,
+            dev,
             tumor_mask=tumor_mask,
             max_subclones=max_subclones,
         )
@@ -882,6 +1036,7 @@ def classify_cells(
             "class": labels.astype(str),
             "confidence": confidence,
             "tumor_score": call_df["tumor_score"].to_numpy(),
+            "cn_burden": cn_burden,
             "subclone": subclones,
             "n_segments_altered": n_segments_altered,
             "low_complexity": low_complexity,
