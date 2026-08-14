@@ -469,10 +469,15 @@ def consensus_template(
     ``template_projection`` divides by ``sum |w t|``, so scaling the template by
     any positive constant leaves every score unchanged. Only its shape matters.
 
-    Known limitation: this estimates ONE consensus direction. Two high-burden
-    subclones carrying opposing profiles cancel here — at equal population size
-    the template collapses toward zero, and an unequal minority clone projects
-    negative and is called normal. See
+    Known limitation: this estimates ONE consensus direction, so two high-burden
+    subclones carrying opposing profiles cannot both be represented. The template
+    does NOT collapse to zero at equal population size, as one might expect from a
+    mean over cancelling directions — per-cell noise breaks the tie and the estimate
+    locks onto one clone's direction (measured on a 50/50 synthetic: template L1
+    7.63, not ~0). That clone then scores positive and is called tumor while the
+    other scores symmetrically negative and is called normal: one malignant
+    population is silently erased behind a confident-looking result, rather than
+    both failing visibly. See
     test_consensus_template_opposing_subclones_is_a_known_limitation. Resolving it
     needs multiple templates with best-aligned scoring, which is a scoring-contract
     change rather than an estimator fix and is deliberately not attempted here.
@@ -681,42 +686,58 @@ def gmm_classify(
     # commit 72d4a8c's 7.0 -> 12.0 widening a no-op, which is the real reason it
     # "saturated" rather than any property of the cohort.
     #
-    # The guard is now stated in score units against the quantity it is actually
-    # trying to protect: fence the tail only when the fence sits ABOVE the bulk of
-    # the non-reference population, so it cannot cut into the tumor mode. Both sides
-    # are per-cell scores, so the comparison means something at any dynamic range.
+    # The guard is stated in score units against the quantity it is actually trying
+    # to protect: fence the tail only when the fence sits ABOVE THE TUMOR MODE, so
+    # it cannot cut into the malignant population. Both sides are per-cell scores,
+    # so the comparison means something at any dynamic range.
     #
-    # A global-IQR fence was tried instead and is worse, not better: on a low-purity
-    # sample the global IQR is dominated by normals and collapses, so the fence cuts
-    # straight through the tumor mode (measured: recall 1.00 -> 0.50 at 2.9% tumor
-    # fraction). The reference pool is the right population to measure; the guard is
-    # the part that was broken.
+    # The tumor mode is located by a PROVISIONAL, unfenced GMM fit — the same fit
+    # this function performs anyway, run once before the fence is decided and then
+    # repeated on the fenced set. That costs one extra fit of a 2-component mixture
+    # on a 1-D vector and introduces no new constant.
     #
-    # NOTE for re-validation: because the old guard never passed, this fence has
-    # effectively never run on the benchmark cohort, at any multiplier. It stays
-    # inert on both synthetics above under the new guard. ``outlier_fence_mult`` is
-    # therefore an untuned parameter, not a settled one — and note the fence runs
-    # inside gmm_classify, i.e. AFTER consensus_template has already been estimated,
-    # so it structurally cannot protect the template from the cells it excludes.
-    # Seed-set robustness has to live in consensus_template itself, which is where
-    # the unit-norm rescaling and the low-complexity exclusion now are.
-    if nm is not None and nm.sum() >= 10:
+    # It has to be the fitted mode and not a quantile of the non-reference scores.
+    # ``normal_mask`` is a reference SUBSET, never the full normal population — the
+    # signature / variance / gmm_fallback tiers of pick_baseline each return a
+    # subset, and a supervised run gets whatever barcodes the user labelled — so
+    # ``scores[~nm]`` is dominated by UNLABELLED NORMALS and its median is the normal
+    # mode, not the tumor mode. A guard written against that median passes trivially,
+    # the fence lands below the tumor mode, and every malignant cell is locked to
+    # "normal": measured on _bimodal_cn_matrix(200 normals, 25 tumor), recall 1.00
+    # with the whole normal population supplied as the reference pool, and 0.00 at
+    # 100, 50 or 30 of them — fence 0.159 against a tumor mode of 0.398, compared to
+    # a non-reference median of 0.008. See
+    # test_outlier_fence_holds_when_reference_pool_is_a_subset.
+    #
+    # A global-IQR fence was tried instead of the reference-pool one and is worse,
+    # not better: on a low-purity sample the global IQR is dominated by normals and
+    # collapses, so the fence cuts straight through the tumor mode (measured: recall
+    # 1.00 -> 0.50 at 2.9% tumor fraction). The reference pool is the right
+    # population to measure the normal mode's width; the guard is the part that was
+    # broken, and the guard's comparison target is what this fixes.
+    #
+    # NOTE for re-validation: because the originally shipped guard never passed, this
+    # fence has effectively never run on the benchmark cohort, at any multiplier. It
+    # stays inert on every synthetic here under the new guard too. ``outlier_fence_mult``
+    # is therefore an untuned parameter, not a settled one. ``n_outlier_fenced`` is
+    # reported in qc.json so a run that does fence cells says so in its own output.
+    # Note also that the fence runs inside gmm_classify, i.e. AFTER consensus_template
+    # has already been estimated, so it structurally cannot protect the template from
+    # the cells it excludes. Seed-set robustness has to live in consensus_template
+    # itself, which is where the unit-norm rescaling and the low-complexity exclusion
+    # now are.
+    scores_for_fit = clip(scores, clip_floor, clip_ceiling)
+    outlier_mask = zeros(len(scores), dtype=bool)
+    if nm is not None and nm.sum() >= 10 and scores_for_fit.std() >= 1e-10:
         baseline_s = scores[nm]
         bq75 = float(percentile(baseline_s, 75))
         bq25 = float(percentile(baseline_s, 25))
         outlier_fence = bq75 + outlier_fence_mult * (bq75 - bq25)
-        # The bulk of the non-reference population. Fencing below this would be
-        # cutting into whatever tumor mode the sample has.
-        non_ref = scores[~nm]
-        tumor_bulk = float(median(non_ref)) if non_ref.size else float("inf")
-        if outlier_fence > tumor_bulk:
+        provisional = GaussianMixture(n_components=2, random_state=0)
+        provisional.fit(scores_for_fit.reshape(-1, 1))
+        tumor_mode = float(provisional.means_.ravel().max())
+        if outlier_fence > tumor_mode:
             outlier_mask = (~nm) & (scores > outlier_fence)
-        else:
-            outlier_mask = zeros(len(scores), dtype=bool)
-    else:
-        outlier_mask = zeros(len(scores), dtype=bool)
-
-    scores_for_fit = clip(scores, clip_floor, clip_ceiling)
 
     # Exclude outlier cells from GMM fitting; they do not represent the
     # tumor/normal distribution we want to learn.
@@ -730,11 +751,13 @@ def gmm_classify(
     # and label everything 'normal' with high confidence.
     if fit_scores.std() < 1e-10:
         import pandas as pd
-        return pd.DataFrame({
+        degenerate = pd.DataFrame({
             "class": ["normal"] * len(scores),
             "confidence": [1.0] * len(scores),
             "tumor_score": scores,
         })
+        degenerate.attrs["n_outlier_fenced"] = int(outlier_mask.sum())
+        return degenerate
     gmm.fit(fit_scores.reshape(-1, 1))
 
     # Predict for ALL cells using the clipped (but not outlier-excluded) scores.
@@ -775,6 +798,10 @@ def gmm_classify(
         "confidence": confidence,
         "tumor_score": scores,
     })
+    # Carried in .attrs rather than as a column: it is a per-run diagnostic, not a
+    # per-cell value, and prediction.csv's schema is a public contract. classify_cells
+    # propagates it and the CLI records it in qc.json.
+    out.attrs["n_outlier_fenced"] = int(outlier_mask.sum())
     return out
 
 
@@ -1044,4 +1071,5 @@ def classify_cells(
         index=asarray(barcodes),
     )
     out.index.name = "barcode"
+    out.attrs["n_outlier_fenced"] = int(call_df.attrs.get("n_outlier_fenced", 0))
     return out

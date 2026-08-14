@@ -1,6 +1,6 @@
 {
   "sample": "tiny_simulated",
-  "kopya_version": "1.0.0",
+  "kopya_version": "1.0.1",
   "milestone": "M4",
   "threads": 8,
   "subclones_enabled": true,
@@ -71,14 +71,14 @@
         "0": 0.3507404923439026,
         "1": 0.35568249225616455,
         "2": 0.3404867947101593,
-        "3": 0.3549169898033142
+        "3": 0.35491693019866943
       },
       "n_normal": 29
     },
     "gmm": {
       "component_means": [
-        0.5472118854522705,
-        0.3523712158203125
+        0.5472114086151123,
+        0.35237112641334534
       ],
       "low_component": 1,
       "n_normal": 200
@@ -110,21 +110,21 @@
     "chr22": 1
   },
   "median_segment_genes": 35,
-  "tumor_signal_max_abs": 1.2648187685809615,
+  "tumor_signal_max_abs": 1.2648187640809143,
   "n_tumor": 300,
   "n_normal_called": 200,
   "n_uncertain": 0,
   "n_low_complexity": 0,
-  "n_subclones_observed": 2,
+  "n_outlier_fenced": 0,
+  "n_subclones_observed": 1,
   "subclone_counts": {
-    "subclone_1": 283,
-    "subclone_2": 17
+    "subclone_1": 300
   },
   "timings_secs": {
-    "load": 0.02,
-    "m1_filter_normalize_project": 0.17,
-    "m2_pick_baseline": 4.13,
-    "m3_smooth_segment_cn": 0.13,
-    "m4_classify_write_outputs": 0.03
+    "load": 0.04,
+    "m1_filter_normalize_project": 0.51,
+    "m2_pick_baseline": 14.23,
+    "m3_smooth_segment_cn": 0.39,
+    "m4_classify_write_outputs": 0.06
   }
 }

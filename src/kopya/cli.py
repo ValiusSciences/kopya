@@ -692,6 +692,9 @@ def run(
         "n_normal_called": n_normal,
         "n_uncertain": n_uncertain,
         "n_low_complexity": int(prediction_df["low_complexity"].sum()),
+        # Cells the outlier fence locked to "normal" — see pipeline.py for why this
+        # is worth recording. Normally 0.
+        "n_outlier_fenced": int(prediction_df.attrs.get("n_outlier_fenced", 0)),
         "n_subclones_observed": n_subclones_observed,
         "subclone_counts": subclone_counts,
         "timings_secs": {

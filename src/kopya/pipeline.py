@@ -164,6 +164,12 @@ def run_pipeline(
         "n_tumor": class_counts.get("tumor", 0),
         "n_normal": class_counts.get("normal", 0),
         "n_uncertain": class_counts.get("uncertain", 0),
+        # Cells the outlier fence locked to "normal". Normally 0 — the fence only
+        # fires when it sits above the fitted tumor mode. A non-zero value means
+        # transcriptome-extreme cells were excluded, and a LARGE one means the fence
+        # is cutting into a population it should not; it is recorded so that is
+        # visible in a run's own output rather than only under a debugger.
+        "n_outlier_fenced": int(prediction_df.attrs.get("n_outlier_fenced", 0)),
         "n_segments": len(segments),
     }
 

@@ -535,17 +535,31 @@ def test_consensus_template_excludes_low_complexity_seeds():
 
 
 def test_consensus_template_opposing_subclones_is_a_known_limitation():
-    """Two equal, exactly-opposing clones cancel — documented, not fixed.
+    """Two equal, exactly-opposing clones: one is recovered, one is erased.
 
-    consensus_template estimates ONE direction. Two high-burden subclones with
-    opposing profiles average toward zero here, so neither projects positively and
-    both are called normal. Resolving it needs multiple templates with
-    best-aligned scoring, which changes the scoring contract rather than the
-    estimator, and is deliberately out of scope for this change.
+    consensus_template estimates ONE direction. With two opposing high-burden
+    subclones the seed set holds both, and per-cell noise — not population size —
+    breaks the tie: the template locks onto whichever clone's direction wins, that
+    clone scores positive and is called tumor, and the other scores symmetrically
+    NEGATIVE and is called normal. Measured here: template L1 7.63 (it does not
+    collapse), clone A median score -0.43, clone B +0.44, calls 0/50 and 50/50.
 
-    This test pins the CURRENT behaviour so the limitation is visible and so a
-    future multi-template change has something to flip. It is a bug with a
-    documented shape, not a property worth preserving.
+    This is the dangerous shape of the limitation, and it is the one armish's review
+    reproduced: a whole malignant population is hidden behind a confident-looking
+    result rather than both clones failing visibly.
+
+    NOTE on this test's history. It previously asserted the opposite — that NEITHER
+    clone is recovered — and passed, because the outlier fence's activation guard was
+    comparing against median(scores[~normal_mask]) and firing spuriously, locking both
+    clones to "normal". The symmetric outcome was an artifact of that bug, and fixing
+    the guard (see test_outlier_fence_holds_when_reference_pool_is_a_subset) exposed
+    the real behaviour. Resolving it needs multiple templates with best-aligned
+    scoring, which changes the scoring contract rather than the estimator and is
+    deliberately out of scope here.
+
+    This pins the CURRENT behaviour so the limitation stays visible and a future
+    multi-template change has something to flip. It is a bug with a documented shape,
+    not a property worth preserving.
     """
     rng = np.random.default_rng(1)
     n_norm = n_a = n_b = 50
@@ -566,17 +580,21 @@ def test_consensus_template_opposing_subclones_is_a_known_limitation():
     )
     cls = df["class"].to_numpy()
 
-    # Neither clone is recovered. Asserted as the known limitation: what must NOT
-    # happen is the asymmetric outcome, where the template picks one clone's sign
-    # and silently calls the other clone's cells normal while calling the first
-    # tumor — that is the failure that hides a whole malignant population behind a
-    # confident-looking result.
-    called_a = (cls[n_norm:n_norm + n_a] == "tumor").sum()
-    called_b = (cls[n_norm + n_a:] == "tumor").sum()
-    assert abs(int(called_a) - int(called_b)) <= 5, (
-        f"asymmetric clone erasure: clone A {called_a}/50 tumor, "
-        f"clone B {called_b}/50 tumor"
+    called_a = int((cls[n_norm:n_norm + n_a] == "tumor").sum())
+    called_b = int((cls[n_norm + n_a:] == "tumor").sum())
+    recovered, erased = sorted((called_a, called_b))
+    # Exactly one clone survives, the other is silently called normal. When the
+    # multi-template change lands, BOTH should be >= 45 and this assertion is what
+    # it has to flip.
+    assert erased >= 45, f"expected one clone recovered, got {called_a}/50 and {called_b}/50"
+    assert recovered <= 5, (
+        f"clone silently erased: {called_a}/50 and {called_b}/50 called tumor — "
+        "if both are now recovered, the multi-template fix landed and this "
+        "known-limitation test should be replaced"
     )
+    # The erased clone is not merely unconfident: it scores on the wrong SIDE of
+    # diploid, which is why nothing downstream flags it.
+    assert df["tumor_score"].to_numpy()[cls == "normal"].min() < -0.2
 
 
 def test_low_purity_sample_still_recovers_tumor_cells():
@@ -607,8 +625,8 @@ def test_outlier_fence_does_not_cut_into_the_tumor_mode():
     It used to be compared against clip_ceiling. Once that ceiling became a global
     quantile the two were incommensurable — the fence is in reference-pool IQR
     units — and the comparison silently stopped passing, disabling the exclusion
-    entirely. The guard now asks whether the fence sits above the bulk of the
-    non-reference population, which is the thing it must not cut into.
+    entirely. The guard now asks whether the fence sits above the fitted tumor mode,
+    which is the thing it must not cut into.
     """
     cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
     w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
@@ -620,6 +638,48 @@ def test_outlier_fence_does_not_cut_into_the_tumor_mode():
     # fenced to "normal" — the failure the old reference-relative fence produced
     # whenever the guard did let it run.
     assert (df["class"].to_numpy()[50:] == "tumor").sum() >= 45
+    assert df.attrs["n_outlier_fenced"] == 0
+
+
+@pytest.mark.parametrize("n_ref", [200, 100, 50, 30, 10])
+def test_outlier_fence_holds_when_reference_pool_is_a_subset(n_ref):
+    """The reference pool is a SUBSET of the normals, and the guard must survive it.
+
+    ``normal_mask`` is never the full normal population: pick_baseline's signature,
+    variance and gmm_fallback tiers each return a subset, and a supervised run gets
+    whatever barcodes the user labelled. So ``scores[~normal_mask]`` is dominated by
+    UNLABELLED NORMALS, and any guard phrased against its median (or any low quantile)
+    is measuring the normal mode while believing it is measuring the tumor mode.
+
+    Regression: an earlier guard compared the fence to ``median(scores[~nm])``. With
+    every normal supplied as the reference pool — the only case the sibling tests
+    cover — that median IS the tumor mode and the guard behaves. Take the pool down
+    to a subset and it becomes ~0, the guard passes trivially, the 12x-reference-IQR
+    fence lands below the tumor mode, and EVERY malignant cell is locked to "normal":
+    recall 1.00 at 200/200 and 0.00 at 100, 50 or 30 (fence 0.159, tumor mode 0.398,
+    non-reference median 0.008). The guard now compares against a provisional GMM's
+    fitted high component, which does not depend on how much of the normal population
+    was labelled.
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(
+        n_normal=200, n_tumor=25, n_segments=20, n_diploid_padding=40,
+    )
+    pool = normal_mask.copy()
+    pool[np.where(normal_mask)[0][n_ref:]] = False
+
+    df = classify_cells(
+        cn_matrix=cn, segments=_segments_for(cn.shape[1]), normal_mask=pool,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+    recall = (cls[~normal_mask] == "tumor").mean()
+    assert recall >= 0.9, f"reference pool {n_ref}/200: tumor recall {recall}"
+    # The unlabelled normals must not be swept up either.
+    unlabelled_normal = normal_mask & ~pool
+    if unlabelled_normal.any():
+        assert (cls[unlabelled_normal] == "tumor").mean() <= 0.1
+    assert df.attrs["n_outlier_fenced"] == 0
 
 
 def test_gmm_classify_bounds_both_tails_of_a_signed_score():
