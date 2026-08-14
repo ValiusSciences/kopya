@@ -1,0 +1,127 @@
+# Changelog
+
+All notable changes to this project are documented here. Versions follow
+[Semantic Versioning](https://semver.org/).
+
+## Unreleased
+
+> **Version number: maintainer's call.** `src/kopya/__init__.py` is deliberately left
+> at the last released version. These changes warrant a **major** bump under SemVer —
+> `tumor_score` changed meaning without changing its name or type, so code that
+> thresholded, sorted, or filtered on it keeps running and returns wrong answers with
+> no error to notice (see *Migration* below) — but which number ships, and whether
+> this releases on its own or with other work, is decided when the release is cut.
+> Set `__version__` and retitle this section then.
+
+### Breaking
+
+- **`prediction.csv` `tumor_score` is now a signed consensus-template projection**,
+  not the unsigned L1 burden `Σ |deviation|`. Positive = deviating *with* the
+  sample's clonal CN profile, `≈ 0` = no copy number, **negative = deviating
+  against it** — a large real deviation in the opposite direction, typically a
+  transcriptionally extreme cell type (erythrocytes, platelets), *not* a
+  confidently diploid cell. The minimum of the column is now the most
+  anti-aligned cell rather than the most diploid one.
+- The score no longer scales with segment count (it is genome-fraction weighted and
+  normalized), so previously calibrated numeric cutoffs do not carry over. It does
+  scale with the amplitude of the sample's own consensus profile.
+- `kopya.tl.cnv()` writes the signed score to `adata.obs[f"{key_added}_score"]`,
+  with the same change of meaning.
+
+### Migration
+
+| if you were doing | do this instead |
+|---|---|
+| `pred.nsmallest(n, "tumor_score")` to find diploid cells | `pred.nsmallest(n, "cn_burden")` |
+| `pred["tumor_score"] > cutoff` as a tumor filter | `pred["class"] == "tumor"`, or re-derive the cutoff on this run |
+| ranking cells by aneuploidy load | `cn_burden`, or `n_segments_altered` for a portable measure |
+| reading `prediction.csv` from an older run | `abs(tumor_score)` is the closest stand-in for `cn_burden` |
+
+`kopya.classify.compute_tumor_scores()` still returns the old unsigned burden and is
+still exported; it is simply no longer what the classifier scores on.
+
+### Added
+
+- **`cn_burden` column in `prediction.csv`** — the non-negative gene-count-weighted
+  mean `|deviation|` across the genome, in the same per-cell-centered frame as the
+  signed score. Appended after `low_complexity`, so every historical column position
+  is unchanged for positional readers of the CopyKAT-compatible prefix.
+- **`adata.obs[f"{key_added}_cn_burden"]`** from `kopya.tl.cnv()`.
+- **`n_outlier_fenced` in `qc.json`** — how many cells the outlier fence locked to
+  `normal`. Normally `0`; a large value means the fence is cutting into a population
+  it should not.
+
+### Changed — classifier
+
+Measured on a 16-patient benchmark cohort (10 with annotation truth, 9 with matched
+bulk WES), against the previous release:
+
+| metric | 1.0.1 | this branch |
+|---|---|---|
+| mean recall | 0.326 | 0.856 |
+| mean accuracy | 0.695 | 0.930 |
+| mean AUC | 0.656 | 0.927 |
+| mean bulk-WES concordance r | 0.463 | 0.620 |
+
+On a held-out protocol where half of each patient's known-normal cells are withheld
+from the tool (143k genuine normals, so false positives are measurable for the first
+time): mean precision 0.741 → 0.858, and **at the 1.0.1 false-positive rate the new
+score reaches 2.3× its recall** (0.728 vs 0.308), on 9 of 10 patients.
+
+- **Per-cell recentering.** The classifier now subtracts each cell's own
+  gene-count-weighted median across segments, matching what `heatmap._recenter` has
+  always done for the figures. That offset was 50-90% of the old score's magnitude
+  and correlated with detected-gene count at up to r=+0.88 *within known-diploid
+  cells* — i.e. much of the old score was library depth.
+- **Gene-count-weighted burden**, normalized to the genome, so the score no longer
+  partly measures segmentation granularity (PELT emits segments spanning >10× in
+  size).
+- **Consensus-template projection.** Cells are scored by signed alignment with the
+  sample's own consensus CN profile, estimated label-free from its most-aneuploid
+  cells. Each seed is rescaled to unit norm so it votes on direction rather than
+  amplitude, and low-complexity cells cannot seed the template.
+- **Winsorization** is on the global 1st/99th percentiles, both tails, instead of a
+  ceiling pinned to the reference pool's spread — which tightened as the score
+  improved and was collapsing 46-91% of true tumor cells onto one value.
+- **`discover_subclones`** clusters the reference-relative deviation instead of the
+  raw depth-confounded matrix, so `subclone_N` labels are not depth strata.
+- **Outlier-fence activation** is decided against a provisional GMM's fitted tumor
+  mode, so the fence cannot cut into the malignant population regardless of how much
+  of the normal population was supplied as the reference pool.
+
+### Fixed
+
+- `classify_cells` no longer raises `ValueError: attempt to get argmax of an empty
+  sequence` on an empty segmentation, which `detect_segments` legitimately returns.
+- `weighted_median_rows` is computed in row blocks (~64 MB of intermediates whatever
+  the segment count) instead of ~8 GB of whole-matrix temporaries at 800k × 500, and
+  guards against zero total weight rather than returning each row's minimum.
+- The reference-relative deviation keeps its input's `float32` precision instead of
+  promoting to `float64`, and `abs(dev)` is materialized once rather than three times.
+
+### Known limitations
+
+- `consensus_template` estimates **one** direction, so two roughly equal opposing
+  subclones cannot both be represented: the template locks onto one, that clone is
+  called tumor, and the other scores symmetrically negative and is called normal.
+  Pinned by `test_consensus_template_opposing_subclones_is_a_known_limitation`.
+  Resolving it needs multiple templates with best-aligned scoring.
+- The GMM's decision threshold is uncalibrated and errs liberal — on the held-out
+  protocol, specificity falls on 9 of 10 patients (mean 0.900 → 0.824), badly on two.
+  The score is better at every operating point; the *cut point* is not yet a
+  deliberate choice. An explicit operating-point control is the intended follow-up.
+- `outlier_fence_mult` has never fired on the benchmark cohort at any multiplier, so
+  it remains untuned.
+- The gold-standard AUCs recorded in `tests/external/GOLD_STANDARD_TESTING.md` were
+  measured under the previous score and have not been re-measured.
+
+## 1.0.1
+
+- Read the package version from `src/kopya/__init__.py` at build time.
+- Widen the classifier's outlier-exclusion fence from 7.0 to 12.0 IQR. (Under the
+  new score this change is a no-op: the fence's activation guard was not passing.)
+- README: PyPI version, Python version and license badges.
+
+## 1.0.0
+
+- First public release.

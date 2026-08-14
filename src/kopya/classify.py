@@ -37,12 +37,14 @@ from numpy import (
     asarray,
     clip,
     cumsum,
+    dtype,
     full,
     median,
     minimum as np_minimum,
     ones,
     percentile,
     sign as np_sign,
+    subtract,
     take_along_axis,
     unique,
     where,
@@ -166,7 +168,18 @@ def weighted_median_rows(mat, weights):
     if n_cols == 0:
         return zeros(n_rows, dtype="float64")
     w = asarray(weights, dtype="float64")
-    half = 0.5 * float(w.sum())
+    total = float(w.sum())
+    if total <= 0.0:
+        # No weight anywhere: there is no majority to sit at, so there is no center
+        # to report. Returning zeros leaves the deviation uncentered, which is the
+        # honest answer; falling through would set half=0, make ``cumw >= half`` true
+        # at position 0, and return each row's MINIMUM — subtracting which would make
+        # every deviation non-negative and erase all loss signal. segment_burden
+        # already guards its own total the same way; this is now a public function
+        # shared with heatmap._recenter, so the asymmetry is worth closing even
+        # though detect_segments (n_genes >= min_seg_genes) cannot currently produce it.
+        return zeros(n_rows, dtype="float64")
+    half = 0.5 * total
     out = zeros(n_rows, dtype="float64")
     # ~8M float64 per intermediate == 64 MB per block, whatever the segment count.
     block = max(1, int(8_000_000 // n_cols))
@@ -342,9 +355,19 @@ def reference_relative_deviation(cn_matrix, normal_mask, baseline=None, seg_weig
     """
     if baseline is None:
         baseline = _normal_pool_baseline(cn_matrix, normal_mask)
-    dev = cn_matrix - baseline
+    # Keep the input's precision. cn_matrix is float32 (segment.per_cell_segment_cn)
+    # but the baseline is a float64 median, so a plain subtraction promotes the whole
+    # matrix and doubles a value that classify_cells then retains for its entire run.
+    # At the 800k x 500 this package documents as commodity-memory-safe that is 3.2 GB
+    # held instead of 1.6 GB, on the same path where weighted_median_rows goes to the
+    # trouble of blocking its own intermediates to 64 MB. float32 is ample here: these
+    # are log-ratios of order 1e-2 to 1e0, and every downstream reduction
+    # (weighted_median_rows' cumsum, segment_burden, template_projection) accumulates
+    # in float64 regardless.
+    out_dtype = cn_matrix.dtype if cn_matrix.dtype.kind == "f" else dtype("float64")
+    dev = subtract(cn_matrix, baseline, dtype=out_dtype)
     if seg_weights is not None:
-        dev = dev - weighted_median_rows(dev, seg_weights)[:, None]
+        dev -= weighted_median_rows(dev, seg_weights)[:, None].astype(out_dtype)
     return dev
 
 
@@ -421,6 +444,7 @@ def segment_burden(deviations, seg_weights=None):
 
 def consensus_template(
     dev, seg_weights=None, seed_quantile=DEFAULT_TEMPLATE_SEED_QUANTILE, exclude=None,
+    abs_dev=None,
 ):
     """The sample's own consensus CN profile, estimated without any labels.
 
@@ -501,6 +525,10 @@ def consensus_template(
             noise-dominated, that noise is large in magnitude, and burden
             selection therefore concentrates them in exactly the set that sets the
             template's direction. Ignored if it would leave no eligible cells.
+        abs_dev: optional precomputed ``abs(dev)``. Purely an allocation saver —
+            classify_cells needs the same array for cn_burden and the altered-segment
+            count, and materializing it three times costs three full copies of a
+            matrix that is already the largest thing in the run.
 
     Returns:
         (n_segments,) float array: the consensus per-segment deviation.
@@ -512,7 +540,9 @@ def consensus_template(
         candidate = ~asarray(exclude, dtype=bool)
         if candidate.any():
             eligible = candidate
-    burden = segment_burden(np_abs(dev), seg_weights)
+    if abs_dev is None:
+        abs_dev = np_abs(dev)
+    burden = segment_burden(abs_dev, seg_weights)
     thr = float(percentile(burden[eligible], 100.0 * seed_quantile))
     seed = eligible & (burden >= thr)
     # Degenerate guard: an exactly-constant burden makes the threshold equal the
@@ -987,13 +1017,19 @@ def classify_cells(
     # Signed alignment with the sample's own consensus CN profile, rather than
     # the magnitude of any departure from the reference (see
     # template_projection for why direction is the discriminating part).
-    template = consensus_template(dev, seg_weights, exclude=low_complexity)
+    # abs(dev) is needed three times below (the template's seed burden, cn_burden,
+    # and the altered-segment count). Materialize it once — it is the same size as
+    # the largest array in the run.
+    abs_dev = np_abs(dev)
+    template = consensus_template(
+        dev, seg_weights, exclude=low_complexity, abs_dev=abs_dev,
+    )
     scores = template_projection(dev, template, seg_weights)
     # Non-negative companion to the signed score: the gene-weighted L1 burden, in
     # the same per-cell-centered frame. This is what "how much CN does this cell
     # carry" means when direction is not the question — see the cn_burden note in
     # the Returns block above for why the two cannot be the same column.
-    cn_burden = segment_burden(np_abs(dev), seg_weights)
+    cn_burden = segment_burden(abs_dev, seg_weights)
     call_df = gmm_classify(
         scores,
         normal_mask=normal_mask,
@@ -1055,7 +1091,7 @@ def classify_cells(
     # the count is of genuinely regional departures rather than of the per-cell
     # global offset (which, being present in every segment, previously made this
     # a proxy for library depth on deep cells).
-    n_segments_altered = (np_abs(dev) > 0.2).sum(axis=1).astype(int)
+    n_segments_altered = (abs_dev > 0.2).sum(axis=1).astype(int)
 
     # ── assemble per-cell DataFrame ───────────────────────────────────────
     out = DataFrame(

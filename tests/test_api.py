@@ -26,8 +26,16 @@ def test_tl_cnv_writes_expected_keys(sim_adata):
     ret = kp.tl.cnv(adata, reference_key="true_class", reference_cat=["normal"])
     assert ret is None, "in-place (copy=False) must return None"
 
-    for col in ("cnv_class", "cnv_score", "cnv_subclone", "cnv_low_complexity"):
+    for col in ("cnv_class", "cnv_score", "cnv_cn_burden", "cnv_subclone",
+                "cnv_low_complexity"):
         assert col in adata.obs, f"missing obs[{col!r}]"
+    # The scanpy surface must expose BOTH halves of the score contract: the signed
+    # projection and its non-negative magnitude. Ranking near-diploid cells on the
+    # signed score picks the most anti-aligned ones instead, so an API that exports
+    # only cnv_score hands users the documented footgun with no way out.
+    scored = adata.obs["cnv_cn_burden"].notna()
+    assert (adata.obs.loc[scored, "cnv_cn_burden"] >= 0).all()
+    assert adata.obs.loc[scored, "cnv_score"].min() < adata.obs.loc[scored, "cnv_cn_burden"].min()
     assert "cnv_chr" in adata.obsm
     assert "cnv" in adata.uns
 

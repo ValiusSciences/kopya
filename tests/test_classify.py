@@ -24,6 +24,7 @@ from kopya.classify import (
     reference_relative_deviation,
     segment_burden,
     template_projection,
+    weighted_median_rows,
 )
 
 
@@ -415,6 +416,36 @@ def test_reference_relative_deviation_exact_tie_is_a_known_limitation():
     # though they carry real, planted CN.
     magnitudes = sorted(float(v) for v in np.unique(centered))
     assert magnitudes == [0.0, 1.0]
+
+
+def test_reference_relative_deviation_keeps_float32():
+    """The deviation must not silently promote to float64.
+
+    cn_matrix is float32 but the normal-pool baseline is a float64 median, so a plain
+    subtraction doubles the size of an array classify_cells then holds for its whole
+    run — 3.2 GB instead of 1.6 GB at the documented 800k x 500, on the same path
+    where weighted_median_rows blocks its own intermediates to 64 MB.
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
+    cn = cn.astype(np.float32)
+    w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
+    assert reference_relative_deviation(cn, normal_mask, seg_weights=w).dtype == np.float32
+    # A float64 input is still respected rather than downcast.
+    assert reference_relative_deviation(
+        cn.astype(np.float64), normal_mask, seg_weights=w
+    ).dtype == np.float64
+
+
+def test_weighted_median_rows_guards_zero_total_weight():
+    """Zero total weight must not return the row MINIMUM.
+
+    half = 0.5 * 0 = 0 makes ``cumw >= half`` true at position 0, so argmax returns
+    the smallest value in the row. Subtracting that as the per-cell center would make
+    every deviation non-negative and erase all loss signal. segment_burden already
+    guards its total the same way.
+    """
+    mat = np.array([[3.0, 1.0, 2.0], [9.0, -4.0, 0.0]])
+    assert np.array_equal(weighted_median_rows(mat, np.zeros(3)), np.zeros(2))
 
 
 def test_normal_pool_baseline_fallback_and_reuse():

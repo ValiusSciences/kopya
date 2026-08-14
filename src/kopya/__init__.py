@@ -24,6 +24,10 @@ from kopya import pl, tl
 from kopya.io import load_counts
 from kopya.pipeline import run_pipeline
 
+# Left at the last released version deliberately: this branch's changes warrant a
+# MAJOR bump (tumor_score changed meaning without changing name or type — see
+# CHANGELOG.md's Unreleased section), but the number is the maintainer's call and is
+# set when the release is cut, not by the branch that prompts it.
 __version__ = "1.0.1"
 
 __all__ = ["tl", "pl", "load_counts", "run_pipeline", "__version__"]

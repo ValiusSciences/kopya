@@ -13,7 +13,10 @@ Usage mirrors infercnvpy / scanpy:
 
     # results now live on the AnnData:
     adata.obs["cnv_class"]          # 'tumor' / 'normal' / 'uncertain' (NaN = QC-filtered)
-    adata.obs["cnv_score"]          # per-cell aneuploidy score
+    adata.obs["cnv_score"]          # SIGNED alignment with the sample's consensus CN
+                                    # profile; ~0 = no CN, negative = deviating AGAINST it
+    adata.obs["cnv_cn_burden"]      # non-negative CN magnitude — rank on THIS, not on
+                                    # cnv_score, to find the cells closest to diploid
     adata.obs["cnv_subclone"]       # subclone label within tumor cells
     adata.obs["cnv_low_complexity"] # bool — ambient / low-gene-count cell flag
     adata.obsm["cnv_chr"]           # cells x chromosomes, 1.0-centered (>1 gain, <1 loss)
@@ -64,8 +67,14 @@ def cnv(
 
     Writes:
         obs[f"{key_added}_class"], obs[f"{key_added}_score"],
-        obs[f"{key_added}_subclone"], obs[f"{key_added}_low_complexity"]
-            per-cell results; NaN for cells dropped by M1 QC.
+        obs[f"{key_added}_cn_burden"], obs[f"{key_added}_subclone"],
+        obs[f"{key_added}_low_complexity"]
+            per-cell results; NaN for cells dropped by M1 QC. ``_score`` is the signed
+            consensus-template projection (prediction.csv's ``tumor_score``) and
+            ``_cn_burden`` its non-negative magnitude companion — the two orderings
+            genuinely disagree, so selecting near-diploid cells means ranking on
+            ``_cn_burden``, never on ``_score``, whose minimum is the most
+            anti-aligned cell rather than the most diploid one.
         obsm[f"{key_added}_chr"]  (n_obs x n_chroms) 1.0-centered CNV matrix;
             rows for dropped cells are NaN.
         uns[key_added]  metadata: chroms, baseline method, counts, params, and a
@@ -154,6 +163,10 @@ def cnv(
     obs_index = adata.obs_names
     adata.obs[f"{key_added}_class"] = pred["class"].reindex(obs_index).astype("category")
     adata.obs[f"{key_added}_score"] = pred["tumor_score"].reindex(obs_index).astype(float)
+    if "cn_burden" in pred:
+        adata.obs[f"{key_added}_cn_burden"] = (
+            pred["cn_burden"].reindex(obs_index).astype(float)
+        )
     if "subclone" in pred:
         adata.obs[f"{key_added}_subclone"] = pred["subclone"].reindex(obs_index).astype("category")
     if "low_complexity" in pred:
