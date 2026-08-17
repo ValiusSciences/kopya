@@ -38,6 +38,7 @@ from numpy import (
     clip,
     cumsum,
     dtype,
+    empty,
     full,
     median,
     minimum as np_minimum,
@@ -217,6 +218,41 @@ def weighted_median_rows(mat, weights):
         # First position whose cumulative weight reaches the halfway mark.
         idx = argmax(cumw >= half, axis=1)
         out[start:start + block] = sorted_vals[arange(chunk.shape[0]), idx]
+    return out
+
+
+def _weighted_row_sum(mat, weights):
+    """``(mat * weights).sum(axis=1)`` without a full-size float64 temporary.
+
+    Written out because the obvious spelling silently defeats the float32 invariant
+    the rest of this path maintains. ``mat`` is float32 (see
+    reference_relative_deviation, which goes to explicit trouble to keep it that way)
+    while a gene-count weight vector is float64, and ``float32 * float64`` promotes:
+    the elementwise product materializes a full ``(n_cells x n_segments)`` FLOAT64
+    array before the reduction ever runs. At the 800k x 500 shape this package's
+    docstrings use as the commodity-memory budget that is ~3.2 GB per call, on the
+    same path where ``weighted_median_rows`` blocks its own intermediates to 64 MB.
+
+    Blocking the reduction bounds the temporary at one block instead, and the
+    arithmetic is UNCHANGED — the reduction is per-row and rows are independent, so
+    each row sees the same values summed in the same order as the unblocked
+    expression. Casting the weights down to float32 would also fix the memory but
+    would round every product, so results would move; this way they do not.
+
+    Args:
+        mat: (n_rows x n_cols) ndarray, any float dtype.
+        weights: (n_cols,) per-column weights.
+
+    Returns:
+        1-D float64 array len == mat.shape[0].
+    """
+    w = asarray(weights, dtype="float64")
+    n_rows, n_cols = mat.shape
+    out = empty(n_rows, dtype="float64")
+    # ~8M float64 per intermediate == 64 MB per block, whatever the segment count.
+    block = max(1, int(8_000_000 // max(n_cols, 1)))
+    for start in range(0, n_rows, block):
+        out[start:start + block] = (mat[start:start + block] * w).sum(axis=1)
     return out
 
 
@@ -404,15 +440,25 @@ def compute_tumor_scores(cn_matrix, normal_mask, baseline=None, seg_weights=None
     ``reference_relative_deviation``), i.e. after both the per-segment normal
     baseline and the cell's own genome-wide median have been removed.
 
-    **This is exactly the ``cn_burden`` column of ``prediction.csv``** —
-    ``segment_burden`` over the same deviation, same weights, same frame. The
-    duplication is deliberate and is pinned by
+    **Called with ``seg_weights``, this is exactly the ``cn_burden`` column of
+    ``prediction.csv``** — ``segment_burden`` over the same deviation, same weights,
+    same frame. The duplication is deliberate and is pinned by
     ``test_segment_burden_is_the_reported_cn_burden`` so the two cannot drift:
     ``classify_cells`` computes the value inline (it already holds ``abs_dev`` and
     would otherwise recompute the whole deviation matrix a second time), while this
     entry point exists for callers who have a raw CN matrix and want the magnitude
     without running the classifier. It is the migration path CHANGELOG.md points at
     for code that relied on the pre-2.0 unsigned ``tumor_score``.
+
+    **Without ``seg_weights`` it is a different quantity, not a slightly different
+    one.** Two things change together: ``reference_relative_deviation`` skips the
+    per-cell centering step (so the result still carries the depth pedestal this
+    release exists to remove), and the sum is unweighted (so it partly measures
+    segmentation granularity). Measured on a 40x30 fixture: 1.2717 against a
+    ``cn_burden`` of 0.0414, a ~30x scale difference in a different frame. There is
+    no way to default the weights here — a per-segment gene count cannot be
+    recovered from ``cn_matrix`` alone — so a caller migrating off the pre-2.0
+    ``tumor_score`` has to pass ``segments["n_genes"]`` to get the column's value.
 
     Despite the name it is NOT what the classifier scores on. ``classify_cells``
     ranks cells by the signed consensus-template projection (see
@@ -426,8 +472,10 @@ def compute_tumor_scores(cn_matrix, normal_mask, baseline=None, seg_weights=None
             _normal_pool_baseline); computed from normal_mask when omitted. Lets
             classify_cells compute the baseline once and share it across the
             score, coherence gate, and n_segments_altered.
-        seg_weights: (n_segments,) per-segment gene counts; forwarded to
-            reference_relative_deviation for the per-cell centering step.
+        seg_weights: (n_segments,) per-segment gene counts, i.e.
+            ``segments["n_genes"]``. Forwarded to reference_relative_deviation for
+            the per-cell centering step AND used to weight the sum. Omitting it
+            disables both — see the note above; pass it to get ``cn_burden``.
 
     Returns:
         1-D float array of tumor scores, len == n_cells.
@@ -480,7 +528,7 @@ def segment_burden(deviations, seg_weights=None):
         # No segments (or all zero-gene): nothing to average over. Zero burden is
         # the honest answer and keeps the empty-segmentation path warning-free.
         return zeros(deviations.shape[0], dtype="float64")
-    return (deviations * w).sum(axis=1) / total
+    return _weighted_row_sum(deviations, w) / total
 
 
 def consensus_template(
@@ -592,16 +640,37 @@ def consensus_template(
     # with no detectable CN structure.
     if not seed.any():
         seed = eligible
-    seeds = asarray(dev[seed], dtype="float64")
+    # Keep the seed subset in the matrix's own dtype. It used to be copied up to
+    # float64 here, which bought nothing — every reduction below accumulates in
+    # float64 anyway — and cost three full float64 copies of the subset (the upcast,
+    # the np_abs, and the division result). At the default seed quantile that subset
+    # is ~25% of the cohort, so on the 800k x 500 budget each copy was ~800 MB.
+    seeds = dev[seed]
     # Rescale each seed to unit weighted-L1 norm so it votes on direction only.
     # Same aggregation as the burden that selected it, so "one unit of deviation"
-    # means the same thing in both places.
-    norms = segment_burden(np_abs(seeds), seg_weights)
+    # means the same thing in both places. abs_dev, when the caller already holds it,
+    # spares recomputing np_abs over the subset.
+    abs_seeds = abs_dev[seed] if abs_dev is not None else np_abs(seeds)
+    norms = segment_burden(abs_seeds, seg_weights)
     keep = norms > 0
     if not keep.any():
         # Every seed is exactly diploid — no direction to estimate.
         return zeros(dev.shape[1], dtype="float64")
-    return (seeds[keep] / norms[keep][:, None]).mean(axis=0)
+    # Mean of the unit-normed seeds, accumulated in float64 in bounded blocks rather
+    # than by materializing the whole normalized subset at once. Unlike
+    # _weighted_row_sum this one is NOT bit-identical to the unblocked spelling: the
+    # reduction runs across cells, so blocking changes the summation order that
+    # ndarray.mean's pairwise accumulation would have used. Measured at 50000 seeds
+    # over 3 blocks the template moves by 2e-16 absolute / 4e-13 relative, i.e. float64
+    # rounding on a quantity whose downstream use is a direction; the tiny_simulated
+    # example reproduces bit-for-bit because its seed subset fits one block.
+    kept = where(keep)[0]
+    acc = zeros(dev.shape[1], dtype="float64")
+    block = max(1, int(8_000_000 // max(dev.shape[1], 1)))
+    for start in range(0, kept.size, block):
+        idx = kept[start:start + block]
+        acc += (seeds[idx] / norms[idx][:, None]).sum(axis=0)
+    return acc / float(kept.size)
 
 
 def template_projection(dev, template, seg_weights=None):
@@ -652,7 +721,7 @@ def template_projection(dev, template, seg_weights=None):
         # No template at all (a sample with no detectable CN structure): every
         # cell scores 0 and gmm_classify's constant-score guard calls them normal.
         return zeros(dev.shape[0], dtype="float64")
-    return (dev * w).sum(axis=1) / denom
+    return _weighted_row_sum(dev, w) / denom
 
 
 def gmm_classify(

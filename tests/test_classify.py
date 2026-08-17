@@ -1236,3 +1236,21 @@ def test_segment_burden_is_the_reported_cn_burden():
         compute_tumor_scores(cn, normal_mask, seg_weights=w),
         rtol=1e-12,
     )
+
+    # And pin the QUALIFIER, because the equality above holds only with the weights
+    # passed. Omitting them changes two things at once — reference_relative_deviation
+    # skips the per-cell centering, and the sum is unweighted — so the result is a
+    # different quantity in a different frame, not a slightly different one. Left
+    # unpinned, the docstring's condition is one refactor away from becoming a lie,
+    # and the migration path in CHANGELOG.md points readers straight at this call.
+    unweighted = compute_tumor_scores(cn, normal_mask)
+    assert not np.allclose(unweighted, df["cn_burden"].to_numpy(), rtol=0.5), (
+        "compute_tumor_scores() without seg_weights matched cn_burden; if that is "
+        "now intended, the docstring and CHANGELOG qualifiers must be removed too"
+    )
+    # It is the uncentered, unweighted L1 — the documented pre-1.1 behaviour.
+    np.testing.assert_allclose(
+        unweighted,
+        np.abs(reference_relative_deviation(cn, normal_mask)).sum(axis=1),
+        rtol=1e-12,
+    )

@@ -38,7 +38,12 @@ All notable changes to this project are documented here. Versions follow
 | reading `prediction.csv` from an older run | `abs(tumor_score)` is the closest stand-in for `cn_burden` |
 
 `kopya.classify.compute_tumor_scores()` still returns the old unsigned burden and is
-still exported; it is simply no longer what the classifier scores on.
+still exported; it is simply no longer what the classifier scores on. **Pass
+`seg_weights=segments["n_genes"]`** if you want the `cn_burden` column's value — with
+the weights omitted it skips the per-cell centering *and* leaves the sum unweighted,
+which is a different quantity in a different frame (measured on a small fixture:
+1.2717 vs a `cn_burden` of 0.0414). The weights cannot be defaulted, because a
+per-segment gene count is not recoverable from the CN matrix alone.
 
 ### Added
 
