@@ -47,9 +47,18 @@ still exported; it is simply no longer what the classifier scores on.
   signed score. Appended after `low_complexity`, so every historical column position
   is unchanged for positional readers of the CopyKAT-compatible prefix.
 - **`adata.obs[f"{key_added}_cn_burden"]`** from `kopya.tl.cnv()`.
-- **`n_outlier_fenced` in `qc.json`** — how many cells the outlier fence locked to
-  `normal`. Normally `0`; a large value means the fence is cutting into a population
-  it should not.
+- **`n_outlier_fenced` in `qc.json`** — how many cells the outlier fence held out of
+  the GMM fit as probable transcriptome artifacts. Normally `0`; a large value means
+  the sample carries a sizeable population of high-scoring cells whose deviation is
+  scattered rather than clonal.
+- **`n_anti_aligned` in `qc.json`** — how many cells the anti-alignment gate moved
+  from `normal` to `uncertain` (see below). Normally `0` or near it; a large value
+  means this sample carries a population the single-template score cannot represent.
+- **`anti_alignment_tumor_n` in `qc.json`** — how many tumor calls that gate's
+  thresholds were estimated from. `0` means the gate **did not run** because too few
+  cells were called tumor, so `n_anti_aligned == 0` only means "nothing flagged" when
+  this is non-zero. Recorded because a silently skipped gate is otherwise
+  indistinguishable from a gate that found nothing.
 
 ### Changed — classifier
 
@@ -83,11 +92,43 @@ score reaches 2.3× its recall** (0.728 vs 0.308), on 9 of 10 patients.
 - **Winsorization** is on the global 1st/99th percentiles, both tails, instead of a
   ceiling pinned to the reference pool's spread — which tightened as the score
   improved and was collapsing 46-91% of true tumor cells onto one value.
+- **The negative tail is excluded from the GMM fit, not just clipped.** A fixed 1%
+  quantile bounds one-in-a-hundred cells, so it answers the "one extreme cell" case
+  and nothing larger. With an anti-aligned population above ~1% of the sample the
+  floor lands *inside* it and the mixture spends a component describing it: measured
+  on a 7.4%-anti-aligned synthetic, component means −1.144 and +0.102 with **all**
+  plain normals in the same component as **all** tumor cells — the tumor/normal split
+  gone entirely, while the emitted labels stayed correct because every normal was in
+  `normal_mask` and got overridden. The outlier fence is now symmetric and its low
+  side excludes those cells from the fit regardless of whether they were labelled,
+  since holding a cell out of the fit is not overriding its label. The low side needs
+  no coherence condition (under a signed score no clone projects negatively), which is
+  also why it works for callers who cannot supply one.
+- **The anti-alignment gate declines to run below 30 tumor calls.** Both of its
+  thresholds are medians over the cells called tumor, so at low purity the median is
+  one or two cells: across 6 runs differing only in RNG seed, the score threshold
+  spanned 8.2× at 5 tumor calls and the gate downgraded 5 cells on two seeds and 0 on
+  the other four at identical purity. `anti_alignment_tumor_n` reports what the
+  estimate rested on.
 - **`discover_subclones`** clusters the reference-relative deviation instead of the
   raw depth-confounded matrix, so `subclone_N` labels are not depth strata.
-- **Outlier-fence activation** is decided against a provisional GMM's fitted tumor
-  mode, so the fence cannot cut into the malignant population regardless of how much
-  of the normal population was supplied as the reference pool.
+- **Outlier fence** now asks whether a high-scoring cell's deviation is *spatially
+  contiguous* rather than where it sits in the score distribution. Scoring far above
+  the reference pool is equally true of a rare real clone and of a cluster of
+  transcriptome-extreme cells, so no threshold on the score alone can tell them apart;
+  the coherent fraction can. The fence also no longer forces its cells to `normal` —
+  it decides what the mixture is *fitted* on, and leaves labelling to the GMM and the
+  gates, so a large unexplained deviation is never asserted diploid.
+- **Anti-alignment gate.** A cell called `normal` that carries a large, coherent
+  deviation pointing *against* the consensus template is now downgraded to
+  `uncertain` rather than asserted normal. Under a signed score such a cell sits at
+  the bottom of the range, next to genuinely diploid cells, and no emitted column
+  distinguished the two. Like the other two gates it only ever moves a cell *to*
+  `uncertain` — it never promotes anything to `tumor`, so it cannot inflate the
+  tumor set, and recall and precision are unchanged by construction. Worst-case
+  specificity cost measured on the benchmark cohort with the reference-pool
+  protection deliberately disabled: 0.45% of known normals (1,275 of 286,101), and
+  zero on the supervised runs where those cells are protected.
 
 ### Fixed
 
@@ -102,18 +143,33 @@ score reaches 2.3× its recall** (0.728 vs 0.308), on 9 of 10 patients.
 ### Known limitations
 
 - `consensus_template` estimates **one** direction, so two roughly equal opposing
-  subclones cannot both be represented: the template locks onto one, that clone is
-  called tumor, and the other scores symmetrically negative and is called normal.
-  Pinned by `test_consensus_template_opposing_subclones_is_a_known_limitation`.
-  Resolving it needs multiple templates with best-aligned scoring.
+  subclones cannot both be *scored*: the template locks onto one, that clone is
+  called tumor, and the other projects symmetrically negative. The opposing clone is
+  no longer silently called `normal` — the anti-alignment gate downgrades it to
+  `uncertain` and counts it in `qc.json` — but it is still not recovered as tumor.
+  Pinned by `test_consensus_template_opposing_subclones_surface_as_uncertain`.
+  Resolving it properly needs multiple templates with best-aligned scoring, which
+  changes the scoring contract and is deliberately deferred to its own change.
+
+  How much this matters in practice, measured rather than assumed: across the 12
+  benchmark patients with more than one discovered subclone, all 56 pairwise
+  correlations between subclone CN profiles average **r = +0.65**, 53 of 56 are
+  positive, and only one falls below −0.3. Real subclones share a clonal backbone
+  and differ by private events; the equal-and-opposite pair this limitation needs is
+  a synthetic construct, not a shape the cohort exhibits. The gate exists so that a
+  sample which *does* exhibit it says so in its own output.
 - The GMM's decision threshold is uncalibrated and errs liberal — on the held-out
   protocol, specificity falls on 9 of 10 patients (mean 0.900 → 0.824), badly on two.
   The score is better at every operating point; the *cut point* is not yet a
   deliberate choice. An explicit operating-point control is the intended follow-up.
-- `outlier_fence_mult` has never fired on the benchmark cohort at any multiplier, so
-  it remains untuned.
+- `outlier_fence_mult` has never fired on the benchmark cohort at any multiplier —
+  every version of the fence's second condition that shipped was either unreachable or
+  wrong — so the multiplier itself remains untuned. Now that the condition is the
+  coherent fraction, `n_outlier_fenced` is the number to watch on a real run.
 - The gold-standard AUCs recorded in `tests/external/GOLD_STANDARD_TESTING.md` were
-  measured under the previous score and have not been re-measured.
+  measured under the previous score and have not been re-measured; the datasets are
+  not present in the environment where the classifier changed. That document now
+  carries a banner saying so at the top, so its tables cannot be read as current.
 
 ## 1.0.1
 

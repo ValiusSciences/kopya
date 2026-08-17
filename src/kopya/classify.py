@@ -65,19 +65,18 @@ from sklearn.mixture import GaussianMixture
 DEFAULT_CALL_CONFIDENCE = 0.5
 
 # Outlier fence multiplier for the IQR-based exclusion in gmm_classify.
-# Non-baseline cells scoring above Q75 + OUTLIER_FENCE_MULT * IQR of the
-# baseline score distribution are excluded from GMM fitting and locked to
-# "normal". This prevents transcriptomically extreme cell types (Erythrocytes,
-# Platelets) whose high scores are driven by transcriptome-mismatch rather
-# than CNV from being incorrectly called as tumor. A tighter fence also
-# forces genuine high-CN-burden tumor cells (multiple/large events, hence a
-# very high tumor_score) into "normal" the same way -- unlike the coherence/
-# low-complexity gates (which only ever downgrade "tumor" to "uncertain"),
-# this is the one mechanism in the classifier that can force a real tumor
-# cell all the way to "normal" and is therefore a plausible direct recall
-# cost. Widened from 7.0 to 12.0 to exclude only the most extreme outliers,
-# leaving more strong-signal tumor cells inside the GMM fit where their
-# score can earn a tumor call on its own merits.
+# Non-baseline cells scoring above Q75 + OUTLIER_FENCE_MULT * IQR of the baseline
+# score distribution become CANDIDATES for exclusion from the GMM fit; whether a
+# candidate is actually held out turns on its coherent fraction, because scoring
+# far above the reference pool is equally true of a rare real clone (see the fence
+# for the measurements). This keeps transcriptomically extreme cell types
+# (Erythrocytes, Platelets), whose high scores are driven by transcriptome mismatch
+# rather than CNV, from dragging a mixture component onto themselves.
+#
+# The height of the fence is therefore not a recall/precision dial the way it reads:
+# in a cleanly separating sample every malignant cell clears it and is held only by
+# its coherence. Widening it from 7.0 to 12.0 (1.0.1) was a no-op for that reason and
+# because no version of the second condition that shipped was ever reachable.
 DEFAULT_OUTLIER_FENCE_MULT = 12.0
 
 # Maximum number of subclones to emit. Capping keeps the per-clone .seg file
@@ -91,6 +90,20 @@ SUBCLONE_RESOLUTION_SWEEP = (0.3, 0.5, 0.8, 1.2, 1.8)
 # Minimum tumor cells required to even attempt subclone discovery. Below this,
 # subclones are noise; we collapse to a single clone.
 MIN_TUMOR_CELLS_FOR_SUBCLONES = 30
+
+# Minimum tumor calls the anti-alignment gate's reference level may be estimated from.
+# The gate places both of its thresholds at ANTI_ALIGNED_FRACTION of the median score
+# and median burden of the cells called tumor, so when few cells are called the median
+# IS one or two cells and the whole gate moves with the noise in them. Measured on a
+# 400-normal fixture with a planted clone, varying only the RNG seed across 6 runs:
+# the score threshold spans 1.1x at ~35 tumor calls, 2.4x at 10, and 8.2x at 5 — and
+# the gate's output flips with it, downgrading 5 cells on two seeds and 0 on the other
+# four at the same purity. There is no meaningful "typical tumor cell" to be half of
+# below this, so the gate declines to run rather than run off noise; the count it
+# rested on reaches qc.json as ``anti_alignment_tumor_n`` (0 = did not run) so a
+# skipped gate is visible instead of silent. Set to match
+# MIN_TUMOR_CELLS_FOR_SUBCLONES, the file's existing answer to the same question.
+MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT = 30
 
 # Cells whose detected-gene count is below this fraction of the cohort-median
 # detected-gene count are flagged low_complexity (ambient / empty-droplet-like).
@@ -126,6 +139,19 @@ DEFAULT_TEMPLATE_SEED_QUANTILE = 0.75
 # Moving-average width (in segments) for the local-contiguity coherence measure.
 # Small so it captures short contiguous runs without spanning whole chromosomes.
 COHERENCE_WINDOW = 5
+
+# Fraction of the malignant population's own level at which the anti-alignment gate
+# (see classify_cells) starts calling a "normal" cell suspicious. The gate asks
+# whether a cell is in the same LEAGUE as the tumor population while pointing the
+# opposite way — not whether it out-does it. Anchoring at the tumor median instead
+# makes the test a knife edge on the case it exists for: two symmetric opposing
+# clones sit at ~1.0x each other's level, so a median threshold splits the opposing
+# clone roughly in half by noise (measured on the opposing-subclone fixture: 9 of 50
+# cells over the score threshold, 22 of 50 over the burden one). The populations this
+# has to separate are ~4x apart in both quantities on real data — an anti-aligned
+# artifact carries ~0.2x the malignant burden, an opposing clone ~1.0x — so the
+# midpoint clears both with a wide margin rather than bisecting either.
+ANTI_ALIGNED_FRACTION = 0.5
 
 
 def weighted_median_rows(mat, weights):
@@ -378,6 +404,21 @@ def compute_tumor_scores(cn_matrix, normal_mask, baseline=None, seg_weights=None
     ``reference_relative_deviation``), i.e. after both the per-segment normal
     baseline and the cell's own genome-wide median have been removed.
 
+    **This is exactly the ``cn_burden`` column of ``prediction.csv``** —
+    ``segment_burden`` over the same deviation, same weights, same frame. The
+    duplication is deliberate and is pinned by
+    ``test_segment_burden_is_the_reported_cn_burden`` so the two cannot drift:
+    ``classify_cells`` computes the value inline (it already holds ``abs_dev`` and
+    would otherwise recompute the whole deviation matrix a second time), while this
+    entry point exists for callers who have a raw CN matrix and want the magnitude
+    without running the classifier. It is the migration path CHANGELOG.md points at
+    for code that relied on the pre-2.0 unsigned ``tumor_score``.
+
+    Despite the name it is NOT what the classifier scores on. ``classify_cells``
+    ranks cells by the signed consensus-template projection (see
+    ``template_projection``); the name is retained because renaming it would break
+    the same callers this function exists to serve.
+
     Args:
         cn_matrix: (n_cells × n_segments) ndarray from per_cell_segment_cn().
         normal_mask: bool array len == n_cells, True for cells in normal pool.
@@ -619,6 +660,8 @@ def gmm_classify(
     normal_mask=None,
     confidence_threshold=DEFAULT_CALL_CONFIDENCE,
     outlier_fence_mult=DEFAULT_OUTLIER_FENCE_MULT,
+    coherence_of=None,
+    coherence_gate=DEFAULT_COHERENCE_GATE,
 ):
     """Fit a 2-component GMM on the tumor-score vector and call each cell.
 
@@ -635,14 +678,27 @@ def gmm_classify(
             "uncertain" rather than a hard tumor/normal call.
         outlier_fence_mult: Multiplier on the reference pool's IQR to define the
             outlier exclusion fence. Non-baseline cells scoring above
-            Q75 + outlier_fence_mult * IQR are excluded from GMM fitting
-            and forced to "normal". This prevents transcriptomically extreme
-            cell types (Erythrocytes, Platelets) — whose high scores reflect
-            transcriptome mismatch rather than CNV — from contaminating the
-            GMM and displacing the true tumor signal. See the activation guard
-            below: the fence only applies when it sits above the bulk of the
-            non-reference population, and it is effectively untuned because the
-            guard it shipped with never passed.
+            Q75 + outlier_fence_mult * IQR are candidates for exclusion from the
+            GMM FIT (not from being called — the fence does not label anything).
+            This prevents transcriptomically extreme cell types (Erythrocytes,
+            Platelets) — whose high scores reflect transcriptome mismatch rather
+            than CNV — from contaminating the mixture and displacing the true
+            tumor component. It is effectively untuned: see the fence itself for
+            why no shipped version of it has ever fired on this repo's benchmark
+            cohort.
+        coherence_of: Optional callable taking a row-index array and returning
+            the per-cell coherent fraction (see _coherent_fraction) for those
+            rows. REQUIRED for the outlier fence to do anything: scoring high is
+            not on its own distinguishable from being a rare real clone, so
+            without a way to ask whether a candidate's deviation is spatially
+            contiguous the fence stays inert rather than guessing. classify_cells
+            supplies ``lambda idx: _coherent_fraction(dev[idx], segments)``,
+            which is evaluated only on the fence's candidate rows.
+        coherence_gate: Coherent-fraction floor below which a fence candidate is
+            treated as a transcriptome artifact rather than a clone. Only used
+            together with ``coherence_of``, and 0 makes the fence inert rather
+            than unconditional — the coherence is what licenses the exclusion, so
+            without a meaningful floor there is nothing to license it.
 
     Returns:
         DataFrame with columns:
@@ -690,84 +746,156 @@ def gmm_classify(
     # share the high component and non-reference normals are called tumor. A
     # quantile floor (rather than a hard floor at 0) bounds that tail without
     # collapsing it onto a single point mass.
+    #
+    # LIMIT of that argument, and why the fence below is symmetric. A 1% quantile
+    # bounds ONE-IN-A-HUNDRED cells, so it answers the "one such cell" case and
+    # nothing larger. When the anti-aligned population is itself more than ~1% of the
+    # sample, the P1 floor lands INSIDE it, most of it survives unclipped, and the
+    # low component locks onto it after all — the exact outcome this paragraph claims
+    # to prevent. Measured on a 200-normal / 50-tumor / 20-anti-aligned synthetic
+    # (7.4% anti-aligned): component means -1.144 and +0.102, with all 200 plain
+    # normals AND all 50 tumor cells inside the high component. The mixture had
+    # stopped separating tumor from normal entirely and was separating artifacts from
+    # everything else. Winsorization cannot fix this — it is a fixed-fraction tool
+    # being asked about a population of unknown size — so the negative tail is
+    # excluded from the FIT by the fence instead, where the threshold scales with the
+    # reference pool's spread rather than with a cell count.
+    #
+    # Note how invisible that failure is from the output: every plain normal was in
+    # ``normal_mask`` and got overridden to "normal" below, so the emitted labels were
+    # exactly right (220 normal / 50 tumor) while the mechanism underneath was
+    # inverted. It only becomes visible when the mask is a strict subset of the
+    # normals, which is the configuration every fixture here used to omit. See
+    # test_heldout_pool_does_not_call_unlabelled_normals_tumor.
     clip_ceiling = float(percentile(scores, 99))
     clip_floor = float(percentile(scores, 1))
     nm = asarray(normal_mask, dtype=bool) if normal_mask is not None else None
 
     # Outlier detection: non-baseline cells scoring far above the bulk of the
     # distribution are likely transcriptome-mismatch cells (Erythrocytes,
-    # Platelets), not CNV-driven. Exclude them from GMM fitting and lock them to
-    # "normal" in the output.
+    # Platelets), not CNV-driven. Hold them out of the GMM fit so they cannot drag
+    # a component onto themselves. They are still scored and called like every other
+    # cell afterwards — see the note at the labelling step for why the fence no
+    # longer forces them to "normal".
     #
     # The fence is a Tukey fence on the REFERENCE POOL's spread — "far above where
     # cells known to be diploid sit" — which is the only spread here that estimates
     # the normal mode's width without depending on how much tumor the sample holds.
+    # A global-IQR fence was tried instead and is worse, not better: on a low-purity
+    # sample the global IQR is dominated by normals and collapses, so the fence cuts
+    # straight through the tumor mode (measured: recall 1.00 -> 0.50 at 2.9% tumor
+    # fraction). The reference pool is the right population to measure the normal
+    # mode's width.
     #
-    # It needs an activation guard, because "far above the normal mode" is also
-    # true of every genuine tumor cell; without one, a cleanly-separating score
-    # locks the whole malignant population to "normal" (100/100 on a synthetic with
-    # a clean clonal gain+loss). The guard that shipped compared the fence to
-    # ``clip_ceiling``, and once that ceiling moved to a global quantile the two
-    # were no longer in the same units: the fence is measured in reference-pool IQR,
-    # which shrinks as the score's noise is removed, so the comparison silently
-    # stopped passing. Measured on that same synthetic, fence 0.146 vs ceiling 0.493
-    # at the shipped multiplier — the exclusion never ran at all. That made this
-    # protection unreachable on any supervised run whose score separates, and made
-    # commit 72d4a8c's 7.0 -> 12.0 widening a no-op, which is the real reason it
-    # "saturated" rather than any property of the cohort.
+    # But "far above the normal mode" is also true of every genuine tumor cell, so
+    # the fence needs a SECOND condition saying which of the high-scoring cells are
+    # artifacts. Three attempts read that condition off the score distribution and
+    # all three failed:
     #
-    # The guard is stated in score units against the quantity it is actually trying
-    # to protect: fence the tail only when the fence sits ABOVE THE TUMOR MODE, so
-    # it cannot cut into the malignant population. Both sides are per-cell scores,
-    # so the comparison means something at any dynamic range.
+    #   * versus ``clip_ceiling``: once the ceiling became a global quantile the two
+    #     were no longer in the same units — the fence is in reference-pool IQR,
+    #     which shrinks as the score's noise is removed — so the comparison silently
+    #     stopped passing. Measured on a clean clonal synthetic, fence 0.146 vs
+    #     ceiling 0.493: the exclusion never ran at all, which is the real reason
+    #     commit 72d4a8c's 7.0 -> 12.0 widening looked "saturated".
+    #   * versus ``median(scores[~nm])``: ``normal_mask`` is a reference SUBSET,
+    #     never the full normal population (pick_baseline's signature / variance /
+    #     gmm_fallback tiers each return a subset, and a supervised run gets whatever
+    #     barcodes the user labelled), so ``scores[~nm]`` is dominated by UNLABELLED
+    #     NORMALS and that median is the normal mode. The guard passed trivially and
+    #     every malignant cell was locked to "normal": recall 1.00 with all 200
+    #     normals supplied as the pool and 0.00 at 100, 50 or 30 of them — fence
+    #     0.159 against a tumor mode of 0.398, non-reference median 0.008. See
+    #     test_outlier_fence_holds_when_reference_pool_is_a_subset.
+    #   * versus a provisional GMM's fitted high component: that fit ran on the
+    #     WINSORIZED scores while the fence and the exclusion ran on the raw ones.
+    #     Below ~1% tumor fraction the malignant population sits above the global P99
+    #     clip ceiling, so the clipped vector holds no tumor mode at all, the fitted
+    #     mode collapsed onto the normal mode, the guard passed — and the fence then
+    #     selected exactly the tumor cells off the raw scores. Measured at 8 tumor /
+    #     2000 normal: ceiling 0.0222, tumor median 0.1763, fitted mode 0.006, fence
+    #     0.1368, recall 0.00. Fitting on the raw scores instead only relocates the
+    #     failure, because with no real tumor present the artifacts ARE the high
+    #     component, so the guard could never fire in the one case the fence exists
+    #     for.
     #
-    # The tumor mode is located by a PROVISIONAL, unfenced GMM fit — the same fit
-    # this function performs anyway, run once before the fence is decided and then
-    # repeated on the fenced set. That costs one extra fit of a 2-component mixture
-    # on a 1-D vector and introduces no new constant.
+    # The last two are one lesson. A small population sitting far above the normal
+    # mode is the SAME 1-D distribution whether it is a rare real clone or a cluster
+    # of transcriptome-extreme cells, so NO statistic of ``scores`` alone can
+    # separate them — which means no activation guard phrased in score units can be
+    # right, and the two failures above were not tuning mistakes.
     #
-    # It has to be the fitted mode and not a quantile of the non-reference scores.
-    # ``normal_mask`` is a reference SUBSET, never the full normal population — the
-    # signature / variance / gmm_fallback tiers of pick_baseline each return a
-    # subset, and a supervised run gets whatever barcodes the user labelled — so
-    # ``scores[~nm]`` is dominated by UNLABELLED NORMALS and its median is the normal
-    # mode, not the tumor mode. A guard written against that median passes trivially,
-    # the fence lands below the tumor mode, and every malignant cell is locked to
-    # "normal": measured on _bimodal_cn_matrix(200 normals, 25 tumor), recall 1.00
-    # with the whole normal population supplied as the reference pool, and 0.00 at
-    # 100, 50 or 30 of them — fence 0.159 against a tumor mode of 0.398, compared to
-    # a non-reference median of 0.008. See
-    # test_outlier_fence_holds_when_reference_pool_is_a_subset.
+    # What does separate them is spatial. A clone's deviation is a contiguous run
+    # across neighbouring segments; an artifact's is scattered spikes. That is
+    # exactly ``_coherent_fraction``, already applied to the same deviation matrix by
+    # the tumor-side gate in classify_cells, so the fence is not introducing a second
+    # notion of "real CN" alongside the one the rest of the classifier uses.
     #
-    # A global-IQR fence was tried instead of the reference-pool one and is worse,
-    # not better: on a low-purity sample the global IQR is dominated by normals and
-    # collapses, so the fence cuts straight through the tumor mode (measured: recall
-    # 1.00 -> 0.50 at 2.9% tumor fraction). The reference pool is the right
-    # population to measure the normal mode's width; the guard is the part that was
-    # broken, and the guard's comparison target is what this fixes.
+    # So the second condition is per-cell coherence, supplied as ``coherence_of`` and
+    # evaluated ONLY on the cells the fence would actually take. The candidate set is
+    # a handful of rows, so this costs one smoothing pass over those rows instead of
+    # the whole matrix, and it removes the extra full GMM fit the previous guard
+    # needed. Without ``coherence_of`` the two cases are indistinguishable here, so
+    # the fence stays inert rather than guessing; a direct gmm_classify caller that
+    # wants it must pass the callable.
     #
-    # NOTE for re-validation: because the originally shipped guard never passed, this
-    # fence has effectively never run on the benchmark cohort, at any multiplier. It
-    # stays inert on every synthetic here under the new guard too. ``outlier_fence_mult``
-    # is therefore an untuned parameter, not a settled one. ``n_outlier_fenced`` is
-    # reported in qc.json so a run that does fence cells says so in its own output.
-    # Note also that the fence runs inside gmm_classify, i.e. AFTER consensus_template
-    # has already been estimated, so it structurally cannot protect the template from
-    # the cells it excludes. Seed-set robustness has to live in consensus_template
-    # itself, which is where the unit-norm rescaling and the low-complexity exclusion
-    # now are.
+    # The fence is SYMMETRIC, and the second condition applies to the high side only.
+    # That asymmetry is the whole point, so it is worth stating why:
+    #
+    #   * HIGH side — a rare real clone lives here, so excluding a cell needs positive
+    #     evidence that it is not one. Hence the coherence condition, and hence the
+    #     fence going inert when coherence is unavailable.
+    #   * LOW side — under a signed score a clone projects POSITIVELY by construction,
+    #     so nothing the GMM needs to resolve lives down here. Measured across this
+    #     repo's 10 annotated benchmark patients: 0.4% of the most anti-aligned 2% of
+    #     cells are ground-truth tumor, and their cn_burden is at or below the cohort
+    #     median on 10 of 10. So no second condition is needed, and none is applied.
+    #
+    # The one thing that does land in the negative tail is a subclone whose profile
+    # opposes the direction consensus_template locked onto. Holding it out of the FIT
+    # is right even so: it is not recoverable under a single template either way (the
+    # documented limitation), it is what was breaking the fit for everyone else, and
+    # the anti-alignment gate in classify_cells still surfaces it as "uncertain" —
+    # exclusion from the fit costs it nothing, because the fence does not label.
+    #
+    # Because the low side needs no coherence, it works for a bare gmm_classify caller
+    # too, where the high side cannot.
+    #
+    # NOTE for re-validation: because no shipped guard ever passed correctly, the HIGH
+    # side of this fence has effectively never run on the benchmark cohort at any
+    # multiplier. ``outlier_fence_mult`` is therefore an untuned parameter, not a
+    # settled one, and ``n_outlier_fenced`` is reported in qc.json so a run that does
+    # fence cells says so in its own output. Note also that the fence runs inside
+    # gmm_classify, i.e. AFTER consensus_template has already been estimated, so it
+    # structurally cannot protect the template from the cells it excludes. Seed-set
+    # robustness has to live in consensus_template itself, which is where the
+    # unit-norm rescaling and the low-complexity exclusion now are.
     scores_for_fit = clip(scores, clip_floor, clip_ceiling)
     outlier_mask = zeros(len(scores), dtype=bool)
     if nm is not None and nm.sum() >= 10 and scores_for_fit.std() >= 1e-10:
         baseline_s = scores[nm]
         bq75 = float(percentile(baseline_s, 75))
         bq25 = float(percentile(baseline_s, 25))
-        outlier_fence = bq75 + outlier_fence_mult * (bq75 - bq25)
-        provisional = GaussianMixture(n_components=2, random_state=0)
-        provisional.fit(scores_for_fit.reshape(-1, 1))
-        tumor_mode = float(provisional.means_.ravel().max())
-        if outlier_fence > tumor_mode:
-            outlier_mask = (~nm) & (scores > outlier_fence)
+        bq_iqr = bq75 - bq25
+
+        # Low side: no second condition, for the reasons above, and no ~nm
+        # restriction either. Holding a cell out of the FIT is not overriding its
+        # label — the normal_mask override below still runs, and the fence no longer
+        # labels anything — so the invariant "a supplied normal_mask is never
+        # overridden" is untouched. And a reference cell sitting 12 IQRs BELOW its own
+        # pool's Q25 is precisely the cell that must not anchor the low component: it
+        # is anomalous by the pool's own yardstick. Restricting this to ~nm left the
+        # broken-mixture case unfixed whenever the anti-aligned population happened to
+        # be labelled — i.e. exactly when the label override would hide it.
+        outlier_mask |= scores < bq25 - outlier_fence_mult * bq_iqr
+
+        # High side: only with a coherent-fraction floor to license it. None and 0
+        # both mean "no floor", hence no high-side fence.
+        if coherence_of is not None and coherence_gate and coherence_gate > 0:
+            cand_idx = where((~nm) & (scores > bq75 + outlier_fence_mult * bq_iqr))[0]
+            if cand_idx.size:
+                scattered = asarray(coherence_of(cand_idx), dtype=float) < coherence_gate
+                outlier_mask[cand_idx[scattered]] = True
 
     # Exclude outlier cells from GMM fitting; they do not represent the
     # tumor/normal distribution we want to learn.
@@ -791,7 +919,8 @@ def gmm_classify(
     gmm.fit(fit_scores.reshape(-1, 1))
 
     # Predict for ALL cells using the clipped (but not outlier-excluded) scores.
-    # Outlier cells will get predictions too, but they are overridden below.
+    # Fenced cells are scored by the mixture like everyone else — the fence decides
+    # what the mixture is FITTED on, not what any cell is called.
     posteriors = gmm.predict_proba(scores_for_fit.reshape(-1, 1))
     assignments = posteriors.argmax(axis=1)
 
@@ -806,8 +935,27 @@ def gmm_classify(
     labels = where(is_tumor_component, "tumor", "normal").astype(object)
     labels[confidence < confidence_threshold] = "uncertain"
 
-    # Force outlier cells to "normal" — they are transcriptome-extreme, not tumor.
-    labels[outlier_mask] = "normal"
+    # Fenced cells are NOT forced to "normal". They used to be, and that made the
+    # fence assert the one thing this classifier is careful never to assert about a
+    # cell carrying a large unexplained deviation. Now that the fence's second
+    # condition is the coherent fraction, it rules on exactly the evidence the
+    # coherence gate in classify_cells rules on, and the two reached opposite
+    # verdicts on the same cell — "normal" here versus "uncertain" there — with
+    # precedence decided by nothing but which ran first. In a cleanly separating
+    # sample that is not an edge case: measured on a 50-normal / 49-tumor synthetic,
+    # all 49 malignant cells clear the fence and are held only by their coherence, so
+    # the fence reaches every tumor-range cell in the sample.
+    #
+    # The module already settled this question in the mirror case. The anti-alignment
+    # gate exists precisely because "confidently normal" is the wrong thing to assert
+    # about a cell whose deviation is large but points the wrong way; a large
+    # SCATTERED deviation is no more explained than a large opposing one. So the fence
+    # keeps the job the whole comment block above is about — deciding what the mixture
+    # is fitted on, which is where it protects the tumor component from being
+    # displaced — and leaves labelling to the GMM and the gates. A fenced artifact
+    # that still lands in the tumor component is then downgraded to "uncertain" by
+    # the coherence gate on the same coherent fraction that fenced it, which is the
+    # honest label for it. ``n_outlier_fenced`` reports the fit exclusion.
 
     # Honor the upstream normal_mask if supplied: cells flagged confident-normal
     # are NEVER reclassified to tumor. They can downgrade to uncertain if their
@@ -935,9 +1083,9 @@ def classify_cells(
 ):
     """Orchestrator: tumor scores → GMM call → gates → subclones → DataFrame.
 
-    After the GMM call, two *subtractive* gates downgrade untrustworthy "tumor"
-    calls to "uncertain" (they never promote a cell to tumor, so they cannot
-    inflate the tumor set or hurt bulk concordance):
+    After the GMM call, three *subtractive* gates downgrade untrustworthy calls to
+    "uncertain". None of them ever promotes a cell to tumor, so none can inflate
+    the tumor set or hurt bulk concordance:
 
       * low-complexity gate — ambient / empty-droplet-like cells (few detected
         genes) have noise-dominated CN signal; a tumor call on them is flagged
@@ -945,10 +1093,20 @@ def classify_cells(
       * coherence gate — a "tumor" call whose deviation is mostly scattered
         single-segment spikes rather than chromosome-arm-scale (a "loud"
         specialized normal cell) is downgraded. Always applied.
+      * anti-alignment gate — a "normal" call that carries a large, coherent
+        deviation pointing *against* the consensus template is downgraded. This is
+        the only gate acting on normal calls, and it exists because the signed
+        score cannot by itself distinguish a confident diploid (≈ 0) from a cell
+        whose real CN opposes the direction the template locked onto (strongly
+        negative). See the gate itself for the four conditions and the cohort
+        measurements behind them. Its thresholds are relative to the malignant
+        population's own level, so it declines to run at all when fewer than
+        MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT cells are called tumor.
 
     This encodes the "flag, don't force" philosophy: cells that are genuinely
-    ambiguous (including same-lineage normals whose expression mimics CNV) land
-    in "uncertain" rather than being asserted as tumor.
+    ambiguous (including same-lineage normals whose expression mimics CNV, and
+    cells whose copy number is real but points the other way) land in "uncertain"
+    rather than being asserted as either class.
 
     Args:
         cn_matrix: (n_cells × n_segments) ndarray.
@@ -968,7 +1126,11 @@ def classify_cells(
         low_complexity_frac: Fraction-of-median detected-gene threshold.
         coherence_gate: Minimum coherent fraction (see _coherent_fraction) for a
             tumor call to stand; below it the call becomes uncertain. Set to 0 to
-            disable.
+            disable that downgrade. Two other places consult the coherent fraction
+            and 0 cannot make either of them fire on a cell it otherwise spares:
+            the outlier fence goes inert, and the anti-alignment gate's third
+            condition holds at DEFAULT_COHERENCE_GATE. See where the three are
+            reconciled in the body.
 
     Returns:
         A DataFrame indexed by barcode with columns:
@@ -1030,10 +1192,36 @@ def classify_cells(
     # carry" means when direction is not the question — see the cn_burden note in
     # the Returns block above for why the two cannot be the same column.
     cn_burden = segment_burden(abs_dev, seg_weights)
+
+    # Three places consult the coherent fraction, and ``coherence_gate=0`` has to
+    # mean something different in each, because the role the coherence plays is
+    # different. Wiring all three to the raw knob is what made ``--coherence-gate 0``
+    # LOOSEN the anti-alignment gate instead of leaving it alone (measured on a
+    # 60/50/15 synthetic: n_anti_aligned 0 at the default, 15 at 0 — it downgraded
+    # exactly the scattered anti-aligned artifacts the default deliberately spares).
+    #
+    #   * tumor-side gate below — coherence IS the decision. 0 turns it off; that is
+    #     the documented meaning of the knob and the only place it applies directly.
+    #   * outlier fence in gmm_classify — coherence ENABLES an action (locking a
+    #     high-scoring cell to "normal"). Threshold 0 there would fence every
+    #     high-scoring non-reference cell, so 0 means the fence goes inert: it may
+    #     only act on evidence the caller has said is meaningful. Strictly the safer
+    #     direction, since an inert fence cannot mislabel a clone.
+    #   * anti-alignment gate below — coherence RESTRICTS an action. Dropping the
+    #     condition makes that gate fire more, so it holds at DEFAULT_COHERENCE_GATE
+    #     regardless: "do not downgrade my focal tumor calls for being scattered" is
+    #     not a claim that scattered anti-aligned artifacts are arm-scale.
+    support_coherence = (
+        float(coherence_gate) if coherence_gate and coherence_gate > 0
+        else DEFAULT_COHERENCE_GATE
+    )
     call_df = gmm_classify(
         scores,
         normal_mask=normal_mask,
         confidence_threshold=confidence_threshold,
+        # Evaluated lazily on the fence's candidate rows only — see the fence.
+        coherence_of=lambda idx: _coherent_fraction(dev[idx], segments),
+        coherence_gate=coherence_gate,
     )
     labels = call_df["class"].to_numpy().astype(object)
     confidence = call_df["confidence"].to_numpy().astype(float).copy()
@@ -1058,12 +1246,82 @@ def classify_cells(
             labels[coh_gate] = "uncertain"
             gated[coh_gate] = True
 
-    # A gate overrides a *confident* GMM tumor call, so the reported confidence
-    # must reflect the downgrade — otherwise a gate-flagged cell keeps its high
-    # tumor posterior and would pass a downstream `confidence >= threshold` filter
-    # despite being uncertain. Report the posterior of the surviving (non-tumor)
-    # interpretation (1 - tumor posterior), which is < 0.5 for a former tumor call,
-    # preserving the invariant "uncertain ⇒ low confidence".
+    # anti-alignment gate — a "normal" call carrying real CN in the direction
+    # OPPOSITE the consensus becomes "uncertain" rather than a confident normal.
+    #
+    # The score is signed, so the bottom of its range is not "most diploid" but
+    # "most anti-aligned". Almost everything down there is a transcriptional
+    # artifact: measured across this repo's 10 annotated benchmark patients, 0.4%
+    # of the most anti-aligned 2% of cells are ground-truth tumor, and their
+    # cn_burden sits at or below the cohort median on 10/10 — they carry LESS copy
+    # number than an average cell, not more. The one thing that also lands there is
+    # a genuine subclone whose profile opposes the direction consensus_template
+    # locked onto (see its Known limitation), and such a cell is indistinguishable
+    # from a confident diploid in every column prediction.csv emits. This gate
+    # makes that case visible rather than silent.
+    #
+    # All four conditions must hold, so an ordinary anti-aligned artifact does not
+    # qualify:
+    #   * it projects AGAINST the consensus by at least ANTI_ALIGNED_FRACTION of how
+    #     far the malignant population projects along it. Stated relative to the
+    #     tumor mode rather than as an absolute cutoff because the score is in
+    #     deviation-amplitude units, so no fixed number ports between samples;
+    #   * it carries at least that same fraction of the malignant population's median
+    #     burden — a large real deviation, not a flat cell at the noise floor;
+    #   * its deviation is as chromosome-arm-scale as a tumor call is required to be;
+    #   * it is not ambient/low-complexity, and was not asserted normal upstream
+    #     (a supplied normal_mask is never overridden, here as everywhere else).
+    #
+    # Like the other two gates this only ever moves a cell TO "uncertain". We do not
+    # know an anti-aligned cell is malignant — only that "confidently normal" is the
+    # wrong thing to assert about it. ``n_anti_aligned`` reaches qc.json so the rate
+    # is visible per run; a large value is the signal that this sample needs
+    # multi-template scoring, which is the fix the single-template limitation defers.
+    #
+    # Both thresholds are medians over the cells called tumor, so the gate needs
+    # enough of them for "the malignant population's level" to mean anything — see
+    # MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT for the measured spread below that floor.
+    # ``anti_alignment_tumor_n`` records what the estimate rested on, 0 when the gate
+    # did not run, so a skipped gate is visible in the run's own output.
+    n_anti_aligned = 0
+    tumor_now = where(labels == "tumor")[0]
+    anti_alignment_tumor_n = (
+        int(tumor_now.size) if tumor_now.size >= MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT else 0
+    )
+    if anti_alignment_tumor_n:
+        tumor_ref = ANTI_ALIGNED_FRACTION * float(median(scores[tumor_now]))
+        burden_ref = ANTI_ALIGNED_FRACTION * float(median(cn_burden[tumor_now]))
+        # tumor_ref <= 0 means the "tumor" component does not project positively at
+        # all — there is no consensus direction to be anti-aligned with, so there is
+        # nothing this gate can meaningfully say.
+        if tumor_ref > 0:
+            candidate = (
+                (labels == "normal")
+                & (~low_complexity)
+                & (scores <= -tumor_ref)
+                & (cn_burden >= burden_ref)
+            )
+            if normal_mask is not None:
+                candidate &= ~asarray(normal_mask, dtype=bool)
+            cand_idx = where(candidate)[0]
+            if cand_idx.size:
+                # ``support_coherence``, not ``coherence_gate`` — this condition is
+                # always evaluated. See where it is defined for why disabling the
+                # tumor-side gate must not make this gate fire more often.
+                coh_frac = _coherent_fraction(dev[cand_idx], segments)
+                cand_idx = cand_idx[coh_frac >= support_coherence]
+            if cand_idx.size:
+                labels[cand_idx] = "uncertain"
+                gated[cand_idx] = True
+                n_anti_aligned = int(cand_idx.size)
+
+    # A gate overrides a *confident* GMM call, so the reported confidence must
+    # reflect the downgrade — otherwise a gate-flagged cell keeps its high posterior
+    # and would pass a downstream `confidence >= threshold` filter despite being
+    # uncertain. Report the posterior of the interpretation no longer being asserted
+    # (1 - the winning posterior), which is < 0.5 for any former confident call,
+    # preserving the invariant "uncertain ⇒ low confidence". This holds for both
+    # directions of downgrade: tumor→uncertain and normal→uncertain.
     confidence[gated] = 1.0 - confidence[gated]
 
     # ── subclone discovery ───────────────────────────────────────────────
@@ -1108,4 +1366,6 @@ def classify_cells(
     )
     out.index.name = "barcode"
     out.attrs["n_outlier_fenced"] = int(call_df.attrs.get("n_outlier_fenced", 0))
+    out.attrs["n_anti_aligned"] = n_anti_aligned
+    out.attrs["anti_alignment_tumor_n"] = anti_alignment_tumor_n
     return out

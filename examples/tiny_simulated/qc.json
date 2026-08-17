@@ -116,15 +116,17 @@
   "n_uncertain": 0,
   "n_low_complexity": 0,
   "n_outlier_fenced": 0,
+  "n_anti_aligned": 0,
+  "anti_alignment_tumor_n": 300,
   "n_subclones_observed": 1,
   "subclone_counts": {
     "subclone_1": 300
   },
   "timings_secs": {
     "load": 0.04,
-    "m1_filter_normalize_project": 0.51,
-    "m2_pick_baseline": 14.23,
+    "m1_filter_normalize_project": 0.49,
+    "m2_pick_baseline": 13.45,
     "m3_smooth_segment_cn": 0.39,
-    "m4_classify_write_outputs": 0.06
+    "m4_classify_write_outputs": 0.07
   }
 }

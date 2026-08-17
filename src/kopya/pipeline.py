@@ -164,12 +164,28 @@ def run_pipeline(
         "n_tumor": class_counts.get("tumor", 0),
         "n_normal": class_counts.get("normal", 0),
         "n_uncertain": class_counts.get("uncertain", 0),
-        # Cells the outlier fence locked to "normal". Normally 0 — the fence only
-        # fires when it sits above the fitted tumor mode. A non-zero value means
-        # transcriptome-extreme cells were excluded, and a LARGE one means the fence
-        # is cutting into a population it should not; it is recorded so that is
-        # visible in a run's own output rather than only under a debugger.
+        # Cells the outlier fence held out of the GMM fit. Normally 0 — the fence only
+        # takes a cell that both scores far above the reference pool AND carries a
+        # scattered rather than contiguous deviation. A non-zero value means
+        # transcriptome-extreme cells were kept out of the mixture; a LARGE one means
+        # this sample has many of them, which is worth knowing when reading its calls.
+        # Recorded so that is visible in a run's own output rather than only under a
+        # debugger. The fence does not label these cells — see gmm_classify.
         "n_outlier_fenced": int(prediction_df.attrs.get("n_outlier_fenced", 0)),
+        # Cells downgraded from "normal" to "uncertain" for carrying large, coherent
+        # copy number pointing AGAINST the consensus template. Normally 0 or near it.
+        # A large value means this sample has a population the single-template score
+        # cannot represent — the documented multi-template limitation, made visible
+        # in the run's own output instead of only in a synthetic reproducer.
+        "n_anti_aligned": int(prediction_df.attrs.get("n_anti_aligned", 0)),
+        # How many tumor calls the gate's thresholds were estimated from. 0 means the
+        # gate DID NOT RUN because too few cells were called tumor for "the malignant
+        # population's level" to mean anything — so n_anti_aligned == 0 is read as
+        # "nothing flagged" only when this is non-zero. Recorded because a silently
+        # skipped gate is indistinguishable from a gate that found nothing.
+        "anti_alignment_tumor_n": int(
+            prediction_df.attrs.get("anti_alignment_tumor_n", 0)
+        ),
         "n_segments": len(segments),
     }
 

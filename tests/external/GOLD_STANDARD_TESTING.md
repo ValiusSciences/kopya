@@ -1,5 +1,33 @@
 # Gold-Standard External Test Suite
 
+> ### ⚠ Every measured number in this document predates the current classifier
+>
+> All recorded AUCs, false-tumor rates, tumor fractions and PASS/FAIL verdicts below
+> were measured with the **pre-2.0 unsigned `tumor_score`** — the L1 burden
+> `Σ |deviation|`. The classifier now scores cells by a *signed* consensus-template
+> projection in a per-cell-recentered frame (see the *Breaking* section of
+> [`CHANGELOG.md`](../../CHANGELOG.md)), which is a different quantity with a
+> different range and a different meaning at its minimum.
+>
+> Concretely, that makes the tables below stale in two distinct ways:
+>
+> * **The AUC thresholds are on a discriminant that no longer exists.** Each
+>   "Malignant vs immune/stromal AUC" row ranks cells by `tumor_score`. Re-running
+>   these on the current code ranks them by a different statistic, so neither the
+>   measured values nor the thresholds calibrated against them carry over.
+> * **Any criterion phrased in absolute score units is meaningless as written**,
+>   because the new score is in deviation-amplitude units and scales with each
+>   sample's own consensus amplitude rather than with segment count.
+>
+> These have **not** been re-measured: the datasets are 100 MB-1 GB each and are not
+> present in the development environment where the classifier changed. Until a run
+> on the current code replaces them, treat every figure here as a record of what the
+> previous release did, not as a claim about this one. Re-measuring is tracked in
+> `CHANGELOG.md` under *Known limitations*.
+>
+> The *protocol* — datasets, acquisition, conversion, how to run, what each metric
+> means — is unaffected and remains correct.
+
 This document describes the external benchmark test suite for kopya.
 It covers what the tests validate, how to acquire the data, how to run the tests,
 what "passing" means, current results, known limitations, and the improvement

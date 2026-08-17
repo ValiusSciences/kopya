@@ -13,6 +13,8 @@ from kopya.classify import (
     DEFAULT_CALL_CONFIDENCE,
     DEFAULT_COHERENCE_GATE,
     DEFAULT_MAX_SUBCLONES,
+    DEFAULT_OUTLIER_FENCE_MULT,
+    MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT,
     _coherent_fraction,
     _low_complexity_mask,
     _normal_pool_baseline,
@@ -565,36 +567,9 @@ def test_consensus_template_excludes_low_complexity_seeds():
     assert float(np.dot(clean, dev[75])) > float(np.dot(contaminated, dev[75]))
 
 
-def test_consensus_template_opposing_subclones_is_a_known_limitation():
-    """Two equal, exactly-opposing clones: one is recovered, one is erased.
-
-    consensus_template estimates ONE direction. With two opposing high-burden
-    subclones the seed set holds both, and per-cell noise — not population size —
-    breaks the tie: the template locks onto whichever clone's direction wins, that
-    clone scores positive and is called tumor, and the other scores symmetrically
-    NEGATIVE and is called normal. Measured here: template L1 7.63 (it does not
-    collapse), clone A median score -0.43, clone B +0.44, calls 0/50 and 50/50.
-
-    This is the dangerous shape of the limitation, and it is the one armish's review
-    reproduced: a whole malignant population is hidden behind a confident-looking
-    result rather than both clones failing visibly.
-
-    NOTE on this test's history. It previously asserted the opposite — that NEITHER
-    clone is recovered — and passed, because the outlier fence's activation guard was
-    comparing against median(scores[~normal_mask]) and firing spuriously, locking both
-    clones to "normal". The symmetric outcome was an artifact of that bug, and fixing
-    the guard (see test_outlier_fence_holds_when_reference_pool_is_a_subset) exposed
-    the real behaviour. Resolving it needs multiple templates with best-aligned
-    scoring, which changes the scoring contract rather than the estimator and is
-    deliberately out of scope here.
-
-    This pins the CURRENT behaviour so the limitation stays visible and a future
-    multi-template change has something to flip. It is a bug with a documented shape,
-    not a property worth preserving.
-    """
-    rng = np.random.default_rng(1)
-    n_norm = n_a = n_b = 50
-    n_seg, n_pad = 20, 40
+def _opposing_subclone_cohort(seed=1, n_norm=50, n_a=50, n_b=50, n_seg=20, n_pad=40):
+    """50 reference cells plus two equal, exactly-opposing high-burden clones."""
+    rng = np.random.default_rng(seed)
     total = n_seg + n_pad
     half = n_seg // 2
     cn = rng.normal(0.0, 0.05, size=(n_norm + n_a + n_b, total))
@@ -603,29 +578,179 @@ def test_consensus_template_opposing_subclones_is_a_known_limitation():
     cn[n_norm + n_a:, :half] -= 0.6
     cn[n_norm + n_a:, half:n_seg] += 0.6
     normal_mask = np.array([True] * n_norm + [False] * (n_a + n_b))
+    return cn, normal_mask, _segments_for(total)
+
+
+def test_consensus_template_opposing_subclones_surface_as_uncertain():
+    """Two equal, exactly-opposing clones: one is called tumor, the other uncertain.
+
+    consensus_template estimates ONE direction. With two opposing high-burden
+    subclones the seed set holds both, and per-cell noise — not population size —
+    breaks the tie: the template locks onto whichever clone's direction wins and
+    that clone scores positive. The other scores symmetrically NEGATIVE, which under
+    a signed score is the same region of the range as a confident diploid cell.
+
+    Scoring that clone correctly needs multiple templates with best-aligned scoring
+    — a change to the scoring contract, deliberately out of scope here. What IS in
+    scope is that the failure not be silent: the anti-alignment gate in
+    classify_cells recognises a large, coherent deviation pointing against the
+    consensus and downgrades those cells to "uncertain" rather than asserting them
+    normal. The clone is still not recovered; it is no longer hidden.
+
+    NOTE on this test's history. It previously asserted that NEITHER clone is
+    recovered, and passed, because the outlier fence's activation guard was
+    comparing against median(scores[~normal_mask]) and firing spuriously, locking
+    both clones to "normal". The symmetric outcome was an artifact of that bug;
+    fixing the guard (see test_outlier_fence_holds_when_reference_pool_is_a_subset)
+    exposed the asymmetric behaviour this now pins.
+    """
+    cn, normal_mask, segments = _opposing_subclone_cohort()
+    n_norm = n_a = 50
+
+    df = classify_cells(
+        cn_matrix=cn, segments=segments, normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+    a, b = cls[n_norm:n_norm + n_a], cls[n_norm + n_a:]
+
+    tumor_counts = sorted((int((a == "tumor").sum()), int((b == "tumor").sum())))
+    assert tumor_counts[1] >= 45, (
+        f"expected one clone recovered as tumor, got {tumor_counts}"
+    )
+    # The other clone is NOT recovered — that is the standing limitation — but every
+    # one of its cells is flagged rather than asserted normal. When the
+    # multi-template change lands, both counts above should be >= 45 and this
+    # assertion is what has to flip.
+    erased = a if (a == "tumor").sum() < (b == "tumor").sum() else b
+    assert int((erased == "uncertain").sum()) >= 45, (
+        f"opposing clone silently called normal: {dict(zip(*np.unique(erased, return_counts=True)))} "
+        "— the anti-alignment gate did not fire"
+    )
+    assert df.attrs["n_anti_aligned"] >= 45
+
+    # The reference pool is untouched: the gate never fires on cells the caller
+    # asserted are normal, and never on cells that are genuinely near diploid.
+    assert (cls[:n_norm] == "normal").all()
+
+    # A downgraded cell must not keep a high posterior, or a downstream
+    # `confidence >= threshold` filter would sail straight past the flag.
+    assert (df["confidence"].to_numpy()[cls == "uncertain"] < DEFAULT_CALL_CONFIDENCE).all()
+
+
+def test_anti_alignment_gate_ignores_ordinary_anti_aligned_artifacts():
+    """The gate must not fire on the negative tail of an ordinary sample.
+
+    A signed score puts transcriptionally extreme normal cells (erythrocytes,
+    platelets) at the bottom of its range roughly half the time, and there are far
+    more of those than there are opposing subclones. Measured across this repo's 10
+    annotated benchmark patients, 0.4% of the most anti-aligned 2% of cells are
+    ground-truth tumor and their cn_burden sits at or below the cohort median on
+    10 of 10 — they carry LESS copy number than an average cell. The gate must
+    therefore key on burden and coherence, not on the sign alone.
+
+    Here: a normal sample with anti-aligned scatter — cells whose deviation opposes
+    the clone but is spread over isolated single segments rather than blocks. They
+    score negative; none of them should be flagged.
+    """
+    rng = np.random.default_rng(7)
+    n_norm, n_tumor, n_art = 60, 50, 15
+    n_seg, n_pad = 20, 40
+    total = n_seg + n_pad
+    half = n_seg // 2
+    cn = rng.normal(0.0, 0.05, size=(n_norm + n_tumor + n_art, total))
+    cn[n_norm:n_norm + n_tumor, :half] += 0.5
+    cn[n_norm:n_norm + n_tumor, half:n_seg] -= 0.5
+    # Anti-aligned but SCATTERED: every third segment of the clone's footprint,
+    # flipped. Same sign pattern as the erased clone, none of the contiguity.
+    art = slice(n_norm + n_tumor, None)
+    cn[art, 0:half:3] -= 0.5
+    cn[art, half:n_seg:3] += 0.5
+    normal_mask = np.array([True] * n_norm + [False] * (n_tumor + n_art))
 
     df = classify_cells(
         cn_matrix=cn, segments=_segments_for(total), normal_mask=normal_mask,
         barcodes=[f"cell{i}" for i in range(cn.shape[0])],
         discover_subclones_enabled=False,
     )
-    cls = df["class"].to_numpy()
-
-    called_a = int((cls[n_norm:n_norm + n_a] == "tumor").sum())
-    called_b = int((cls[n_norm + n_a:] == "tumor").sum())
-    recovered, erased = sorted((called_a, called_b))
-    # Exactly one clone survives, the other is silently called normal. When the
-    # multi-template change lands, BOTH should be >= 45 and this assertion is what
-    # it has to flip.
-    assert erased >= 45, f"expected one clone recovered, got {called_a}/50 and {called_b}/50"
-    assert recovered <= 5, (
-        f"clone silently erased: {called_a}/50 and {called_b}/50 called tumor — "
-        "if both are now recovered, the multi-template fix landed and this "
-        "known-limitation test should be replaced"
+    scores = df["tumor_score"].to_numpy()
+    # Precondition: these cells really do land in the negative tail, so the test is
+    # exercising the gate's specificity rather than a sample that never reaches it.
+    assert scores[art].max() < 0, "fixture no longer produces anti-aligned cells"
+    assert df.attrs["n_anti_aligned"] == 0, (
+        "the anti-alignment gate fired on scattered transcriptional artifacts; it "
+        "must key on coherent, high-burden deviation, not on negative sign alone"
     )
-    # The erased clone is not merely unconfident: it scores on the wrong SIDE of
-    # diploid, which is why nothing downstream flags it.
-    assert df["tumor_score"].to_numpy()[cls == "normal"].min() < -0.2
+    # And the real clone is unaffected by the gate's presence.
+    assert int((df["class"].to_numpy()[n_norm:n_norm + n_tumor] == "tumor").sum()) >= 45
+
+
+@pytest.mark.parametrize("amp", [1.0, 2.0, 3.0])
+def test_coherence_gate_zero_never_loosens_the_anti_alignment_gate(amp):
+    """``coherence_gate=0`` is documented as disabling a downgrade. It must not
+    ENABLE one somewhere else.
+
+    Three places consult the coherent fraction and the knob cannot mean the same
+    thing in all of them. In the tumor-side gate coherence IS the decision, so 0
+    turns it off. In the anti-alignment gate it is a RESTRICTING condition — one of
+    four that all must hold — so wiring it to the raw knob meant 0 dropped the
+    condition and left the gate firing on three, downgrading exactly the scattered
+    anti-aligned artifacts that test_anti_alignment_gate_ignores_ordinary_anti_
+    aligned_artifacts pins as must-not-fire. Measured on this fixture at amp 1.0:
+    n_anti_aligned 0 with the gate at its default, 15 with it at 0.
+
+    The invariant: switching the tumor-side gate off may not increase the number of
+    cells any other gate touches.
+    """
+    rng = np.random.default_rng(7)
+    n_norm, n_tumor, n_art = 60, 50, 15
+    n_seg, n_pad = 20, 40
+    total = n_seg + n_pad
+    half = n_seg // 2
+    cn = rng.normal(0.0, 0.05, size=(n_norm + n_tumor + n_art, total))
+    cn[n_norm:n_norm + n_tumor, :half] += 0.5
+    cn[n_norm:n_norm + n_tumor, half:n_seg] -= 0.5
+    # Anti-aligned and scattered, at a range of amplitudes.
+    art = slice(n_norm + n_tumor, None)
+    cn[art, 0:half:3] -= amp
+    cn[art, half:n_seg:3] += amp
+    normal_mask = np.array([True] * n_norm + [False] * (n_tumor + n_art))
+    kw = dict(
+        cn_matrix=cn, segments=_segments_for(total), normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+
+    on = classify_cells(**kw)
+    off = classify_cells(coherence_gate=0.0, **kw)
+    assert off.attrs["n_anti_aligned"] <= on.attrs["n_anti_aligned"], (
+        f"amp {amp}: disabling the tumor-side coherence gate made the anti-alignment "
+        f"gate fire on more cells ({on.attrs['n_anti_aligned']} -> "
+        f"{off.attrs['n_anti_aligned']})"
+    )
+    # Same invariant for the fence's HIGH side, the other place a coherent fraction
+    # licenses an action: with no floor left it goes inert rather than unconditional.
+    # The LOW side is deliberately unaffected — it needs no coherence, because under a
+    # signed score no clone projects negatively (see the fence), so there is nothing
+    # for a coherent fraction to protect down there. So every exclusion at
+    # coherence_gate=0 must be a low-side one.
+    segs = _segments_for(total)
+    w = segs["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+    scores = template_projection(dev, consensus_template(dev, w), w)
+    ref = scores[normal_mask]
+    q75, q25 = np.percentile(ref, 75), np.percentile(ref, 25)
+    n_low_side = int((scores < q25 - DEFAULT_OUTLIER_FENCE_MULT * (q75 - q25)).sum())
+    assert off.attrs["n_outlier_fenced"] == n_low_side, (
+        f"amp {amp}: at coherence_gate=0 the fence excluded "
+        f"{off.attrs['n_outlier_fenced']} cells but only {n_low_side} are on its low "
+        "side — the high side did not go inert"
+    )
+    # And the label-level invariant: disabling a gate cannot leave MORE cells flagged.
+    assert (off["class"].to_numpy() == "uncertain").sum() <= (
+        on["class"].to_numpy() == "uncertain"
+    ).sum()
 
 
 def test_low_purity_sample_still_recovers_tumor_cells():
@@ -651,25 +776,287 @@ def test_low_purity_sample_still_recovers_tumor_cells():
 
 
 def test_outlier_fence_does_not_cut_into_the_tumor_mode():
-    """The fence's activation guard must be stated in score units.
+    """The fence must not take a cleanly-separating sample's malignant population.
 
-    It used to be compared against clip_ceiling. Once that ceiling became a global
-    quantile the two were incommensurable — the fence is in reference-pool IQR
-    units — and the comparison silently stopped passing, disabling the exclusion
-    entirely. The guard now asks whether the fence sits above the fitted tumor mode,
-    which is the thing it must not cut into.
+    Every tumor cell is "far above where the reference pool sits", so the fence
+    reaches all of them — measured on this fixture, 49/49 clear it — and what holds
+    them is the coherent fraction, not the fence's height. The fence therefore has
+    to be handed a way to ask about coherence (``coherence_of``); with none, the
+    high-scorers are indistinguishable from artifacts and it must stay inert rather
+    than guess. Both halves are asserted here.
+
+    History: three earlier versions of this second condition were phrased as
+    activation guards on the score distribution (against clip_ceiling, against
+    median(scores[~nm]), against a provisional GMM's high component) and each
+    either never fired or fenced the tumor population outright. See the fence.
     """
     cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
-    w = _segments_for(cn.shape[1])["n_genes"].to_numpy()
+    segments = _segments_for(cn.shape[1])
+    w = segments["n_genes"].to_numpy()
     dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
     scores = template_projection(dev, consensus_template(dev, w), w)
 
-    df = gmm_classify(scores, normal_mask=normal_mask)
-    # A cleanly-separating score must not have its whole malignant population
-    # fenced to "normal" — the failure the old reference-relative fence produced
-    # whenever the guard did let it run.
+    # With coherence available, the tumor cells are recognised as clonal and kept.
+    df = gmm_classify(
+        scores, normal_mask=normal_mask,
+        coherence_of=lambda idx: _coherent_fraction(dev[idx], segments),
+    )
     assert (df["class"].to_numpy()[50:] == "tumor").sum() >= 45
     assert df.attrs["n_outlier_fenced"] == 0
+    # Precondition for the above meaning anything: they really are fence candidates.
+    b = scores[normal_mask]
+    fence = np.percentile(b, 75) + 12.0 * (np.percentile(b, 75) - np.percentile(b, 25))
+    assert (scores[50:] > fence).all(), "fixture no longer exercises the fence"
+
+    # Without coherence there is nothing to license an exclusion, so none happens.
+    bare = gmm_classify(scores, normal_mask=normal_mask)
+    assert bare.attrs["n_outlier_fenced"] == 0
+    assert (bare["class"].to_numpy()[50:] == "tumor").sum() >= 45
+
+
+@pytest.mark.parametrize("n_tumor,n_normal", [(8, 2000), (15, 2015)])
+def test_outlier_fence_spares_a_sub_one_percent_clone(n_tumor, n_normal):
+    """A clone below ~1% of the sample must survive the fence.
+
+    Regression for a frame mismatch: the fence's activation guard located the tumor
+    mode with a GMM fitted on the WINSORIZED scores, while the fence itself and the
+    exclusion test ran on the RAW ones. Below ~1% tumor fraction the malignant
+    population sits above the global P99 clip ceiling, so the clipped vector holds no
+    tumor mode at all, the fitted mode collapsed onto the normal mode, the guard
+    passed — and the fence then selected exactly the tumor cells. Measured at 8/2008:
+    ceiling 0.0222, tumor median 0.1763, fitted mode 0.006, fence 0.1368, and all 8
+    malignant cells fenced for a recall of 0.00. The sibling tests all sit at >= 2.9%
+    purity, where the clip ceiling still lands above the tumor mode and the frame
+    mismatch is invisible.
+
+    No statistic of the score vector can fix this: a handful of cells far above the
+    normal mode is the same 1-D distribution whether they are a rare clone or a
+    cluster of transcriptome artifacts. The fence separates them spatially instead
+    (see test_outlier_fence_holds_out_incoherent_high_scorers for the other side).
+    """
+    cn, normal_mask, _ = _bimodal_cn_matrix(
+        n_normal=n_normal, n_tumor=n_tumor, n_segments=20, n_diploid_padding=40,
+    )
+    df = classify_cells(
+        cn_matrix=cn, segments=_segments_for(cn.shape[1]), normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    recall = (df["class"].to_numpy()[n_normal:] == "tumor").mean()
+    assert recall >= 0.9, (
+        f"{n_tumor}/{n_normal + n_tumor} tumor fraction: recall {recall}, "
+        f"{df.attrs['n_outlier_fenced']} cells fenced"
+    )
+    assert df.attrs["n_outlier_fenced"] == 0
+
+
+def test_outlier_fence_holds_out_incoherent_high_scorers():
+    """The other side: high-scoring SCATTERED cells are held out of the GMM fit.
+
+    This is the case the fence exists for, and no version of it that guarded on the
+    score distribution could ever reach: with no real tumor present the artifacts
+    themselves are the high component, so a guard comparing the fence to a fitted
+    tumor mode is structurally unable to fire. Measured before the fix — 980 cells at
+    ~N(0, 0.01) plus 20 at 5.0, 100 of them labelled reference — the fence sat at
+    0.170 against a fitted mode of ~5, nothing was fenced, and all 20 artifacts were
+    called tumor.
+
+    Note what is and is not asserted. The fence decides what the mixture is FITTED
+    on; it does not label anything (see the note at gmm_classify's labelling step for
+    why it stopped forcing "normal"). So the contract is that these cells are held
+    out and end up not asserted malignant — the coherence gate downgrades whichever
+    of them the mixture still puts in the tumor component.
+    """
+    rng = np.random.default_rng(0)
+    n_norm, n_art, n_seg, n_pad = 500, 20, 20, 40
+    total = n_seg + n_pad
+    cn = rng.normal(0.0, 0.05, size=(n_norm + n_art, total))
+    # Transcriptome-extreme, not CNV: large deviation on scattered single segments
+    # with no contiguous run anywhere.
+    for r in range(n_norm, n_norm + n_art):
+        cols = rng.choice(total, size=12, replace=False)
+        cn[r, cols] += rng.choice([-1, 1], size=12) * 3.0
+    normal_mask = np.array([True] * n_norm + [False] * n_art)
+    segments = _segments_for(total)
+
+    df = classify_cells(
+        cn_matrix=cn, segments=segments, normal_mask=normal_mask,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    # Precondition: they are scattered by the same measure the fence uses.
+    w = segments["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
+    assert np.median(_coherent_fraction(dev[n_norm:], segments)) < DEFAULT_COHERENCE_GATE
+
+    assert df.attrs["n_outlier_fenced"] > 0, (
+        "the fence did not fire on scattered transcriptome-extreme cells — the one "
+        "case it exists for"
+    )
+    assert (df["class"].to_numpy()[n_norm:] == "tumor").sum() == 0
+    # And the reference pool's LABELS are untouched. (The fence's high side only
+    # considers ~normal_mask; its low side considers everyone, because holding a cell
+    # out of the fit is not overriding its label.)
+    assert (df["class"].to_numpy()[:n_norm] == "normal").all()
+
+
+def _anti_aligned_cohort(n_norm=200, n_tumor=50, n_art=20, art_amp=1.2,
+                         n_seg=20, n_pad=40, seed=3):
+    """Normals + a coherent clone + a coherent ANTI-ALIGNED normal population.
+
+    The artifacts here are true normals carrying a large contiguous deviation that
+    opposes the clone — erythrocyte/platelet-like cells under a signed score. Sized at
+    20/270 = 7.4% of the sample, deliberately above the 1% the winsorization can bound.
+
+    Returns (cn, truth_normal, all_normals_pool, n_norm, n_tumor, n_art) where
+    ``truth_normal`` marks every genuinely diploid cell (plain normals AND artifacts)
+    and ``all_normals_pool`` is the "every normal labelled" reference mask.
+    """
+    rng = np.random.default_rng(seed)
+    total = n_seg + n_pad
+    half = n_seg // 2
+    n = n_norm + n_tumor + n_art
+    cn = rng.normal(0.0, 0.05, size=(n, total))
+    cn[n_norm:n_norm + n_tumor, :half] += 0.5
+    cn[n_norm:n_norm + n_tumor, half:n_seg] -= 0.5
+    cn[n_norm + n_tumor:, :half] -= art_amp
+    cn[n_norm + n_tumor:, half:n_seg] += art_amp
+    truth_normal = np.zeros(n, dtype=bool)
+    truth_normal[:n_norm] = True
+    truth_normal[n_norm + n_tumor:] = True
+    return cn, truth_normal, truth_normal.copy(), n_norm, n_tumor, n_art
+
+
+def _heldout_pool(truth_normal, frac, seed=0):
+    """Label only ``frac`` of the true normals — what a real run supplies.
+
+    ``normal_mask`` is never the full normal population: pick_baseline's tiers each
+    return a subset and a supervised run gets whatever barcodes the user labelled. A
+    fixture that supplies all of them lets the mask's own override produce the right
+    answer no matter what the classifier did, which is how several defects here stayed
+    invisible. Cells outside the returned pool are the ones whose labels the
+    classifier actually has to earn.
+    """
+    rng = np.random.default_rng(seed)
+    pool = truth_normal.copy()
+    idx = np.where(truth_normal)[0]
+    drop = rng.permutation(idx)[int(len(idx) * frac):]
+    pool[drop] = False
+    return pool
+
+
+@pytest.mark.parametrize("frac", [1.0, 0.5, 0.25])
+def test_heldout_pool_does_not_call_unlabelled_normals_tumor(frac):
+    """A large anti-aligned population must not collapse the tumor/normal split.
+
+    Winsorization clips a FIXED FRACTION (1% per tail), so it answers the "one extreme
+    cell" case and nothing larger. With the anti-aligned population at 7.4% of the
+    sample the P1 floor landed inside it, most of it survived unclipped, and the
+    2-component mixture spent one component describing IT — leaving all 200 plain
+    normals in the same component as all 50 tumor cells (measured means -1.144 and
+    +0.102). The mixture had stopped separating tumor from normal altogether.
+
+    That was invisible at frac=1.0: every plain normal was in ``normal_mask`` and got
+    overridden to "normal", so the emitted labels were exactly right while the
+    mechanism underneath was inverted. Take the pool down to a subset and 90 of the
+    unlabelled normals come out as "tumor". This test asserts on the UNLABELLED
+    normals for that reason — they are the only cells whose label the classifier had
+    to earn.
+    """
+    cn, truth_normal, _, n_norm, n_tumor, n_art = _anti_aligned_cohort()
+    pool = _heldout_pool(truth_normal, frac)
+    df = classify_cells(
+        cn_matrix=cn, segments=_segments_for(cn.shape[1]), normal_mask=pool,
+        barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+        discover_subclones_enabled=False,
+    )
+    cls = df["class"].to_numpy()
+    held_out = truth_normal & ~pool
+    tumor_rows = np.zeros(cn.shape[0], dtype=bool)
+    tumor_rows[n_norm:n_norm + n_tumor] = True
+
+    if held_out.any():
+        called_tumor = int((cls[held_out] == "tumor").sum())
+        assert called_tumor == 0, (
+            f"pool={pool.sum()}/{truth_normal.sum()}: {called_tumor} of "
+            f"{int(held_out.sum())} unlabelled true normals called tumor — the mixture "
+            "is not separating tumor from normal"
+        )
+    assert (cls[tumor_rows] == "tumor").mean() >= 0.9, (
+        f"pool={pool.sum()}/{truth_normal.sum()}: tumor recall "
+        f"{(cls[tumor_rows] == 'tumor').mean()}"
+    )
+    # The anti-aligned population is held out of the FIT at every pool size, including
+    # frac=1.0 where it is entirely inside normal_mask. Restricting the low side of the
+    # fence to ~normal_mask left the broken mixture unfixed in exactly the case the
+    # label override would hide.
+    assert df.attrs["n_outlier_fenced"] >= n_art
+
+
+def test_heldout_pool_mixture_separates_tumor_from_normal():
+    """Pin the mechanism, not just the labels: check the split the GMM actually made.
+
+    ``classify_cells`` output can look perfect while the mixture underneath is
+    inverted, because the normal_mask override repairs it. Calling gmm_classify with a
+    subset pool removes that repair for the held-out cells, so their labels report what
+    the mixture really did.
+    """
+    cn, truth_normal, _, n_norm, n_tumor, n_art = _anti_aligned_cohort()
+    pool = _heldout_pool(truth_normal, 0.5)
+    segments = _segments_for(cn.shape[1])
+    w = segments["n_genes"].to_numpy()
+    dev = reference_relative_deviation(cn, pool, seg_weights=w)
+    scores = template_projection(dev, consensus_template(dev, w), w)
+
+    df = gmm_classify(
+        scores, normal_mask=pool,
+        coherence_of=lambda idx: _coherent_fraction(dev[idx], segments),
+    )
+    cls = df["class"].to_numpy()
+    # Plain normals on the diploid side, the clone on the tumor side, the anti-aligned
+    # population on neither — all without a gate or an override involved.
+    assert (cls[:n_norm] == "tumor").sum() == 0
+    assert (cls[n_norm:n_norm + n_tumor] == "tumor").mean() >= 0.9
+    assert (cls[n_norm + n_tumor:] == "tumor").sum() == 0
+    assert df.attrs["n_outlier_fenced"] >= n_art
+
+
+@pytest.mark.parametrize("n_tumor", [50, 10, 5, 2])
+def test_anti_alignment_gate_declines_below_the_tumor_cell_floor(n_tumor):
+    """The gate must not estimate "the malignant population's level" from a few cells.
+
+    Both of its thresholds are medians over the cells called tumor. Below the floor
+    that median IS one or two cells: measured across 6 seeds differing in nothing else,
+    the score threshold spanned 8.2x at 5 tumor calls, and the gate downgraded 5 cells
+    on two seeds and 0 on the other four at the same purity. Above the floor it runs
+    normally; below it, it declines and says so via ``anti_alignment_tumor_n``.
+    """
+    seen = set()
+    for seed in range(4):
+        cn, truth_normal, _, n_norm, nt, n_art = _anti_aligned_cohort(
+            n_norm=400, n_tumor=n_tumor, n_art=5, art_amp=0.35, seed=100 + seed,
+        )
+        pool = np.zeros(cn.shape[0], dtype=bool)
+        pool[:n_norm] = True          # artifacts unlabelled, so gate-eligible
+        df = classify_cells(
+            cn_matrix=cn, segments=_segments_for(cn.shape[1]), normal_mask=pool,
+            barcodes=[f"cell{i}" for i in range(cn.shape[0])],
+            discover_subclones_enabled=False,
+        )
+        n_called = int((df["class"].to_numpy() == "tumor").sum())
+        ref_n = df.attrs["anti_alignment_tumor_n"]
+        if n_called < MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT:
+            assert ref_n == 0, (
+                f"gate ran on {n_called} tumor calls, below the floor of "
+                f"{MIN_TUMOR_CELLS_FOR_ANTI_ALIGNMENT}"
+            )
+            assert df.attrs["n_anti_aligned"] == 0
+        else:
+            assert ref_n == n_called
+        seen.add(df.attrs["n_anti_aligned"])
+    # Whatever it does, it does the same thing on every seed — the flapping this floor
+    # exists to stop was 5/0/5/0 across seeds at the same purity.
+    assert len(seen) == 1, f"gate output varies with the RNG seed alone: {seen}"
 
 
 @pytest.mark.parametrize("n_ref", [200, 100, 50, 30, 10])
@@ -688,9 +1075,9 @@ def test_outlier_fence_holds_when_reference_pool_is_a_subset(n_ref):
     to a subset and it becomes ~0, the guard passes trivially, the 12x-reference-IQR
     fence lands below the tumor mode, and EVERY malignant cell is locked to "normal":
     recall 1.00 at 200/200 and 0.00 at 100, 50 or 30 (fence 0.159, tumor mode 0.398,
-    non-reference median 0.008). The guard now compares against a provisional GMM's
-    fitted high component, which does not depend on how much of the normal population
-    was labelled.
+    non-reference median 0.008). The fence's second condition is now the candidate's
+    own coherent fraction, which does not depend on how much of the normal population
+    was labelled — or on any other property of the score distribution.
     """
     cn, normal_mask, _ = _bimodal_cn_matrix(
         n_normal=200, n_tumor=25, n_segments=20, n_diploid_padding=40,
@@ -761,18 +1148,10 @@ def test_classify_cells_tolerates_empty_segmentation():
     assert (df["cn_burden"].to_numpy() == 0).all()
 
 
-def test_diploid_baseline_ranks_on_magnitude_not_signed_score():
-    """heatmap's recentering baseline must not select anti-aligned cells.
-
-    _confident_diploid_mask keeps normals at or below a score quantile. Under a
-    signed projection the MINIMUM is the most anti-aligned cell — one carrying a
-    large real event in the opposite direction — not the most diploid one. That
-    baseline feeds _recenter and propagates into the heatmap, the denoised matrix,
-    chr_cnv_matrix.csv, {sample}_clones.seg and the matched-bulk concordance.
-    """
+def _diploid_panels(cn, normal_mask):
+    """(artifacts kept when ranking on burden, when ranking on the signed score)."""
     from kopya.heatmap import _confident_diploid_mask
 
-    cn, normal_mask = _cohort_with_artifacts(10, 6.0)
     segments = _segments_for(cn.shape[1])
     df = classify_cells(
         cn_matrix=cn, segments=segments, normal_mask=normal_mask,
@@ -781,18 +1160,64 @@ def test_diploid_baseline_ranks_on_magnitude_not_signed_score():
     )
     cls = df["class"].to_numpy()
     low_c = df["low_complexity"].to_numpy()
-
     on_burden, _ = _confident_diploid_mask(cls, low_c, df["cn_burden"].to_numpy(), 0.5)
     on_signed, _ = _confident_diploid_mask(cls, low_c, df["tumor_score"].to_numpy(), 0.5)
+    # Artifacts are rows 100+.
+    return int(np.asarray(on_burden)[100:].sum()), int(np.asarray(on_signed)[100:].sum()), df
 
-    # Artifacts are rows 100+. Ranking on the signed score pulls them in (they are
-    # the most negative cells in the cohort); ranking on burden excludes them.
-    assert np.asarray(on_burden)[100:].sum() == 0
-    assert np.asarray(on_signed)[100:].sum() > 0
+
+def test_diploid_baseline_ranks_on_magnitude_not_signed_score():
+    """heatmap's recentering baseline must not select anti-aligned cells.
+
+    _confident_diploid_mask keeps normals at or below a score quantile. Under a
+    signed projection the MINIMUM is the most anti-aligned cell — one carrying a
+    real event in the opposite direction — not the most diploid one. That baseline
+    feeds _recenter and propagates into the heatmap, the denoised matrix,
+    chr_cnv_matrix.csv, {sample}_clones.seg and the matched-bulk concordance.
+
+    Uses MILD artifacts (0.2 against a 0.5 clone) precisely because the
+    anti-alignment gate is deliberately conservative and does not fire on them.
+    That is what keeps this a test of the ranking rather than of the gate: the gate
+    removes only the extreme tail, so ranking on `cn_burden` remains load-bearing
+    for everything below it. The complementary regime is the next test.
+    """
+    on_burden, on_signed, df = _diploid_panels(*_cohort_with_artifacts(10, 0.2))
+
+    assert df.attrs["n_anti_aligned"] == 0, "fixture is meant to sit below the gate"
+    assert on_burden == 0
+    assert on_signed > 0, (
+        "ranking the diploid panel on the signed score no longer selects "
+        "anti-aligned cells — if a change made that safe, this test and the "
+        "cn_burden ranking in heatmap._confident_diploid_mask should be revisited "
+        "together"
+    )
+
+
+def test_anti_alignment_gate_keeps_extreme_artifacts_out_of_the_diploid_panel():
+    """Above the gate's threshold, neither ranking can select the artifacts.
+
+    The gate downgrades a large, coherent, anti-aligned cell to "uncertain", and
+    _confident_diploid_mask only ever keeps cells called "normal" — so the extreme
+    tail is removed from the recentering baseline before the ranking question even
+    arises. This is the defence-in-depth half of the previous test: burden ranking
+    handles the mild cases, the gate handles the extreme ones.
+    """
+    on_burden, on_signed, df = _diploid_panels(*_cohort_with_artifacts(10, 6.0))
+
+    assert df.attrs["n_anti_aligned"] == 10
+    assert on_burden == 0
+    assert on_signed == 0
 
 
 def test_segment_burden_is_the_reported_cn_burden():
-    """cn_burden is exactly segment_burden over the shared deviation."""
+    """cn_burden is exactly segment_burden over the shared deviation.
+
+    Also pins the third name for this same quantity: ``compute_tumor_scores`` is
+    the public entry point CHANGELOG.md offers as the migration path for code that
+    relied on the pre-2.0 unsigned ``tumor_score``, and ``classify_cells`` computes
+    the value inline rather than calling it. Two implementations of one definition
+    can drift; this asserts they do not.
+    """
     cn, normal_mask, _ = _bimodal_cn_matrix(n_segments=20, n_diploid_padding=40)
     segments = _segments_for(cn.shape[1])
     w = segments["n_genes"].to_numpy()
@@ -805,4 +1230,9 @@ def test_segment_burden_is_the_reported_cn_burden():
     dev = reference_relative_deviation(cn, normal_mask, seg_weights=w)
     np.testing.assert_allclose(
         df["cn_burden"].to_numpy(), segment_burden(np.abs(dev), w), rtol=1e-12,
+    )
+    np.testing.assert_allclose(
+        df["cn_burden"].to_numpy(),
+        compute_tumor_scores(cn, normal_mask, seg_weights=w),
+        rtol=1e-12,
     )
