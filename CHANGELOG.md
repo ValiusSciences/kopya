@@ -75,12 +75,12 @@ bulk WES), against the previous release:
 | mean recall | 0.326 | 0.856 |
 | mean accuracy | 0.695 | 0.930 |
 | mean AUC | 0.656 | 0.927 |
-| mean bulk-WES concordance r | 0.463 | 0.620 |
+| mean bulk-WES concordance r | 0.463 | 0.618 |
 
 On a held-out protocol where half of each patient's known-normal cells are withheld
 from the tool (143k genuine normals, so false positives are measurable for the first
 time): mean precision 0.741 → 0.858, and **at the 1.0.1 false-positive rate the new
-score reaches 2.3× its recall** (0.728 vs 0.308), on 9 of 10 patients.
+score reaches 2.37× its recall** (0.728 vs 0.308), on 9 of 10 patients.
 
 - **Per-cell recentering.** The classifier now subtracts each cell's own
   gene-count-weighted median across segments, matching what `heatmap._recenter` has
@@ -164,7 +164,7 @@ score reaches 2.3× its recall** (0.728 vs 0.308), on 9 of 10 patients.
   a synthetic construct, not a shape the cohort exhibits. The gate exists so that a
   sample which *does* exhibit it says so in its own output.
 - The GMM's decision threshold is uncalibrated and errs liberal — on the held-out
-  protocol, specificity falls on 9 of 10 patients (mean 0.900 → 0.824), badly on two.
+  protocol, specificity falls on 8 of 10 patients (mean 0.900 → 0.824), badly on two.
   The score is better at every operating point; the *cut point* is not yet a
   deliberate choice. An explicit operating-point control is the intended follow-up.
 - `outlier_fence_mult` has never fired on the benchmark cohort at any multiplier —
