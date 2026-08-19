@@ -20,6 +20,7 @@ from click import BadParameter
 from click import Choice
 from click import Path as ClickPath
 from click import echo, group, option, version_option
+from numpy import abs as np_abs
 from numpy import asarray as np_asarray
 from numpy import median as np_median
 from numpy import savez_compressed
@@ -251,8 +252,9 @@ def cli():
     show_default=True,
     help="Downgrade a 'tumor' call to 'uncertain' when less than this fraction of "
          "its CN deviation is contiguous (chromosome-arm-scale) rather than scattered. "
-         "0 disables. Lower it for focal-amplification-dominated tumors whose signal "
-         "is concentrated in few segments.",
+         "0 disables that downgrade, and cannot make any other gate fire on a cell it "
+         "otherwise spares. Lower it for focal-amplification-dominated tumors whose "
+         "signal is concentrated in few segments.",
 )
 @option(
     "--low-complexity-frac",
@@ -591,12 +593,19 @@ def run(
         from kopya.heatmap import reference_relative_signal
         low_c = (prediction_df["low_complexity"].to_numpy()
                  if "low_complexity" in prediction_df.columns else None)
+        # Rank baseline candidates on the non-negative magnitude, never on the
+        # signed tumor_score — whose minimum is the most ANTI-aligned cell, not the
+        # most diploid one. Same rule (and same fallback for older prediction.csv
+        # files) as heatmap.render_heatmap.
+        ref_rank = (prediction_df["cn_burden"].to_numpy()
+                    if "cn_burden" in prediction_df.columns
+                    else np_abs(prediction_df["tumor_score"].to_numpy()))
         try:
             rc, is_ref, _ = reference_relative_signal(
                 cn_matrix,
                 prediction_df["class"].to_numpy(),
                 low_c,
-                prediction_df["tumor_score"].to_numpy(),
+                ref_rank,
                 segments,
                 sd_amplifier=sd_amplifier,
             )
@@ -684,6 +693,18 @@ def run(
         "n_normal_called": n_normal,
         "n_uncertain": n_uncertain,
         "n_low_complexity": int(prediction_df["low_complexity"].sum()),
+        # Cells the outlier fence held out of the GMM fit as probable transcriptome
+        # artifacts — see pipeline.py for why this is worth recording. Normally 0.
+        "n_outlier_fenced": int(prediction_df.attrs.get("n_outlier_fenced", 0)),
+        # Cells the anti-alignment gate moved from "normal" to "uncertain" for
+        # carrying large, coherent copy number pointing AGAINST the consensus
+        # template — see pipeline.py. Normally 0 or near it.
+        "n_anti_aligned": int(prediction_df.attrs.get("n_anti_aligned", 0)),
+        # Tumor calls the gate's thresholds rested on; 0 means it did not run — see
+        # pipeline.py.
+        "anti_alignment_tumor_n": int(
+            prediction_df.attrs.get("anti_alignment_tumor_n", 0)
+        ),
         "n_subclones_observed": n_subclones_observed,
         "subclone_counts": subclone_counts,
         "timings_secs": {
@@ -1023,9 +1044,10 @@ def find_inputs(patient_dir, sample, out_dir):
     default=0.5,
     show_default=True,
     help="The reference panel (and recentering baseline) is the confident-diploid "
-         "subset: non-junk normals with tumor_score at or below this quantile of "
-         "that pool. Excludes under-called tumor cells from the reference. 1.0 keeps "
-         "every non-junk normal.",
+         "subset: non-junk normals with cn_burden (the non-negative CN magnitude, "
+         "NOT the signed tumor_score) at or below this quantile of that pool. "
+         "Excludes under-called tumor cells from the reference. 1.0 keeps every "
+         "non-junk normal.",
 )
 @option(
     "--show-low-complexity",

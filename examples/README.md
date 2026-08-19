@@ -31,7 +31,7 @@ what the numbers mean. The tumor population reads chr7 ≈ 1.8 and chr10 ≈ 0.3
 
 | File | What it is |
 |------|-----------|
-| `prediction.csv` | per-cell `class` / `confidence` / `tumor_score` / `subclone` / `n_segments_altered` / `low_complexity` |
+| `prediction.csv` | per-cell `class` / `confidence` / `tumor_score` / `subclone` / `n_segments_altered` / `low_complexity` / `cn_burden` — note `tumor_score` is **signed** (negative = deviating against the clone), and `cn_burden` is its non-negative magnitude companion |
 | `segments.parquet` | segment-to-genome map (`segment_id`, `chr`, gene-axis indices, `start_bp`/`end_bp`, `n_genes`, `tumor_mean`) |
 | `cn_per_segment.npz` | dense per-cell × per-segment CN matrix (`cn`) + `cell_barcodes` |
 | `cn_per_segment_denoised.npz` | same shape, but **recentered + denoised** (opt-in via `--denoise-outputs`): a clean gain/loss matrix (0 ≈ diploid, >0 gain, <0 loss) where the normal floor collapses to ~0 and hallmark events survive |

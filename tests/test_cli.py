@@ -201,7 +201,7 @@ def test_run_produces_valid_prediction_csv(cli_run_output):
     df = pd.read_csv(pred_path, index_col=0)
 
     # Column names (index is the barcode column)
-    expected_cols = {"class", "confidence", "tumor_score", "subclone", "n_segments_altered", "low_complexity"}
+    expected_cols = {"class", "confidence", "tumor_score", "cn_burden", "subclone", "n_segments_altered", "low_complexity"}
     assert set(df.columns) == expected_cols, (
         f"Unexpected columns: {set(df.columns)!r}, expected {expected_cols!r}"
     )
@@ -613,7 +613,7 @@ def _assert_cellranger_outputs(out_dir: Path, sample: str, n_cells: int) -> None
 
     # prediction.csv must have the right schema and valid class labels.
     pred = pd.read_csv(out_dir / "prediction.csv", index_col=0)
-    assert set(pred.columns) == {"class", "confidence", "tumor_score",
+    assert set(pred.columns) == {"class", "confidence", "tumor_score", "cn_burden",
                                  "subclone", "n_segments_altered", "low_complexity"}
     assert set(pred["class"].unique()) <= VALID_CLASSES
     assert len(pred) == n_cells

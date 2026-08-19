@@ -56,6 +56,11 @@ def write_prediction_csv(prediction_df, out_path):
     cols = ["class", "confidence", "tumor_score", "subclone", "n_segments_altered"]
     if "low_complexity" in prediction_df.columns:
         cols = cols + ["low_complexity"]
+    # cn_burden is appended after low_complexity for the same reason low_complexity
+    # itself is appended last: it keeps every historical column position intact for
+    # a positional reader of the CopyKAT-compatible prefix.
+    if "cn_burden" in prediction_df.columns:
+        cols = cols + ["cn_burden"]
     ordered = prediction_df[cols]
 
     target = Path(out_path)
