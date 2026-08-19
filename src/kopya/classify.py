@@ -76,7 +76,7 @@ DEFAULT_CALL_CONFIDENCE = 0.5
 #
 # The height of the fence is therefore not a recall/precision dial the way it reads:
 # in a cleanly separating sample every malignant cell clears it and is held only by
-# its coherence. Widening it from 7.0 to 12.0 (1.0.1) was a no-op for that reason and
+# its coherence. Widening it from 7.0 to 12.0 (2.0.0) was a no-op for that reason and
 # because no version of the second condition that shipped was ever reachable.
 DEFAULT_OUTLIER_FENCE_MULT = 12.0
 

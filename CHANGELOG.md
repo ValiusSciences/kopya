@@ -3,15 +3,12 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 2.0.0 — 2026-08-19
 
-> **Version number: maintainer's call.** `src/kopya/__init__.py` is deliberately left
-> at the last released version. These changes warrant a **major** bump under SemVer —
-> `tumor_score` changed meaning without changing its name or type, so code that
-> thresholded, sorted, or filtered on it keeps running and returns wrong answers with
-> no error to notice (see *Migration* below) — but which number ships, and whether
-> this releases on its own or with other work, is decided when the release is cut.
-> Set `__version__` and retitle this section then.
+> **Why major.** `tumor_score` changed meaning without changing its name or type, so
+> code that thresholded, sorted, or filtered on it keeps running and returns wrong
+> answers with no error to notice. See *Breaking* and *Migration* below before
+> upgrading.
 
 ### Breaking
 
@@ -70,7 +67,7 @@ per-segment gene count is not recoverable from the CN matrix alone.
 Measured on a 16-patient benchmark cohort (10 with annotation truth, 9 with matched
 bulk WES), against the previous release:
 
-| metric | 1.0.1 | this branch |
+| metric | 1.0.1 | 2.0.0 |
 |---|---|---|
 | mean recall | 0.326 | 0.856 |
 | mean accuracy | 0.695 | 0.930 |
@@ -145,6 +142,18 @@ score reaches 2.37× its recall** (0.728 vs 0.308), on 9 of 10 patients.
 - The reference-relative deviation keeps its input's `float32` precision instead of
   promoting to `float64`, and `abs(dev)` is materialized once rather than three times.
 
+### Packaging and tooling
+
+These three landed on `main` after the `v1.0.1` tag was cut, so despite their commit
+dates they ship to users for the first time here, not in 1.0.1.
+
+- The package version is read from `src/kopya/__init__.py` at build time, so
+  `pyproject.toml` no longer carries a second copy to keep in sync.
+- The classifier's outlier-exclusion fence default widens from 7.0 to 12.0 IQR. Under
+  this release's score the change is a no-op — the fence's activation guard was not
+  passing either way (see *Known limitations*).
+- README: PyPI version, Python version and license badges.
+
 ### Known limitations
 
 - `consensus_template` estimates **one** direction, so two roughly equal opposing
@@ -178,10 +187,7 @@ score reaches 2.37× its recall** (0.728 vs 0.308), on 9 of 10 patients.
 
 ## 1.0.1
 
-- Read the package version from `src/kopya/__init__.py` at build time.
-- Widen the classifier's outlier-exclusion fence from 7.0 to 12.0 IQR. (Under the
-  new score this change is a no-op: the fence's activation guard was not passing.)
-- README: PyPI version, Python version and license badges.
+- Publish as `valius-kopya` on PyPI, and add the Trusted-Publishing release workflow.
 
 ## 1.0.0
 

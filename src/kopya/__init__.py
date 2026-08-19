@@ -24,10 +24,9 @@ from kopya import pl, tl
 from kopya.io import load_counts
 from kopya.pipeline import run_pipeline
 
-# Left at the last released version deliberately: this branch's changes warrant a
-# MAJOR bump (tumor_score changed meaning without changing name or type — see
-# CHANGELOG.md's Unreleased section), but the number is the maintainer's call and is
-# set when the release is cut, not by the branch that prompts it.
-__version__ = "1.0.1"
+# Single source of truth for the package version: pyproject.toml reads this at build
+# time via [tool.hatch.version]. Bump it here, and retitle CHANGELOG.md's top section
+# to match, when cutting a release.
+__version__ = "2.0.0"
 
 __all__ = ["tl", "pl", "load_counts", "run_pipeline", "__version__"]
