@@ -165,8 +165,9 @@ def cli():
     help=(
         "Comma-separated subset of signature names to treat as 'normal' "
         "(e.g. 'T_cell,B_cell,Endothelial'). Overrides the library's allow-list "
-        "— drop an inversion-prone label (e.g. Fibroblast) or add one "
-        "(e.g. Plasma_cell) for a given sample."
+        "— add back a label the defaults exclude (e.g. Fibroblast on "
+        "fibroblast-rich normal stroma, Plasma_cell on reactive infiltrate) or "
+        "drop one your tumor scores on, for a given sample."
     ),
 )
 @option(

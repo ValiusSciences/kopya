@@ -2,8 +2,8 @@
   "_meta": {
     "purpose": "Non-malignant cell-type signatures used to seed the confident-normal pool during baseline picking (kopya §3.2). Cells whose top signature score exceeds --normal-score-threshold and resolves to a non-malignant cell type are treated as diploid baseline.",
     "curation": "Conservative canonical-marker sets from PanglaoDB / CellMarker / Human Cell Atlas, restricted to highly specific markers to keep false-positive normal calls low. Deliberately small (5-12 genes per set) — UCell-style rank statistics are stable at this size and noise from broader sets hurts more than recall helps for the malignant/non-malignant axis.",
-    "non_malignant_labels": ["T_cell", "B_cell", "NK_cell", "Myeloid", "Neutrophil", "Endothelial", "Fibroblast", "Pericyte", "Osteoblast", "Smooth_muscle"],
-    "version": 3
+    "non_malignant_labels": ["T_cell", "B_cell", "NK_cell", "Myeloid", "Neutrophil", "Endothelial", "Pericyte", "Osteoblast", "Smooth_muscle"],
+    "version": 4
   },
 
   "T_cell": [
