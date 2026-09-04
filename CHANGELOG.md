@@ -5,6 +5,34 @@ All notable changes to this project are documented here. Versions follow
 
 ## Unreleased
 
+### Added
+
+- **`--centered-chr-matrix` writes `chr_cnv_matrix_centered.csv`**, an optional,
+  purely additive companion to `chr_cnv_matrix.csv` with each cell's row divided
+  by its own median chromosome (`outputs.center_chr_cnv_matrix()`). Off by
+  default; the raw file is always written unchanged, and nothing in the pipeline
+  reads the centered one, so calls are unaffected. `1.0` in the centered file
+  means *that cell's median chromosome*, not *diploid* — it is for visualization
+  and relative per-cell interpretation, and the raw file remains the source of
+  truth for absolute copy-number level.
+
+### Documentation
+
+- **Documented the per-cell offset in `chr_cnv_matrix.csv`.** The file is
+  calibrated only up to a per-cell scale factor: the per-gene centering leaves a
+  pedestal that scales with how many genes a cell detected, and the scalar
+  baseline subtracted at write time removes only the pool-wide part. The residual
+  cancels within a cell and across a pseudobulk — which is why the matched-bulk
+  concordance never saw it — but not when cells are compared to each other at one
+  chromosome, where it correlates strongly with sequencing depth and can exceed
+  the per-chromosome biology. The README, the `compute_chr_cnv_matrix` docstring
+  and the results notebook now say so and point at the one-line fix; the notebook
+  previously recommended the file for per-cell work without qualification.
+- Corrected `heatmap.py`'s module docstring (and the matching `--scale linear`
+  note in the README), which said the recentered heatmap shares the "1.0-centered"
+  frame of `chr_cnv_matrix.csv`. The heatmap subtracts each cell's own median;
+  the CSV does not.
+
 ### Changed
 
 - **`Fibroblast` is no longer an allowed normal reference in unsupervised mode**

@@ -6,6 +6,7 @@ import pytest
 
 from kopya.outputs import (
     _logspace_to_one_centered,
+    center_chr_cnv_matrix,
     compute_chr_cnv_matrix,
     segments_with_coordinates,
     write_chr_cnv_matrix_csv,
@@ -328,6 +329,112 @@ def test_chr_cnv_matrix_scalar_pedestal_preserves_tumor_shape():
     # The two profiles differ by a single constant across chromosomes.
     diff = fixed_log2 - raw_log2
     np.testing.assert_allclose(diff, diff[0], atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# center_chr_cnv_matrix() — the optional per-cell centering behind
+# --centered-chr-matrix. Additive: none of this touches compute_chr_cnv_matrix.
+# ---------------------------------------------------------------------------
+
+def _offset_matrix():
+    """A 1.0-centered chr matrix with a planted gain, loss, and per-cell offset.
+
+    Column 2 is a gain and column 4 a loss in every cell; the per-cell factors
+    span 0.8x-1.6x, the shape of the offset seen on real runs.
+    """
+    rng = np.random.default_rng(7)
+    base = np.exp(rng.normal(0.0, 0.02, size=(8, 6)))
+    base[:, 2] *= 1.4
+    base[:, 4] *= 0.6
+    offsets = np.array([0.8, 0.9, 0.95, 1.0, 1.05, 1.2, 1.4, 1.6])[:, None]
+    return base, offsets, base * offsets
+
+
+def test_center_chr_cnv_matrix_row_medians_are_one():
+    """The defining property: every cell's median chromosome lands on 1.0."""
+    _, _, raw = _offset_matrix()
+    centered = center_chr_cnv_matrix(raw)
+    np.testing.assert_allclose(np.median(centered, axis=1), 1.0, atol=1e-12)
+
+
+def test_center_chr_cnv_matrix_preserves_shape_ids_and_within_row_ratios():
+    """Dividing a row by a constant cannot add or remove chromosome-level signal.
+
+    This is what makes the centered file safe: the ratio between any two
+    chromosomes of the same cell — which is where a gain or loss actually lives —
+    comes through untouched, and the matrix keeps its shape and dtype so the
+    barcodes/columns written beside it still line up.
+    """
+    _, _, raw = _offset_matrix()
+    centered = center_chr_cnv_matrix(raw)
+
+    assert centered.shape == raw.shape
+    assert centered.dtype == raw.dtype
+    assert np.all(centered > 0), "1.0-centered values must stay strictly positive"
+
+    # Every pairwise within-row ratio survives exactly.
+    for j in range(raw.shape[1]):
+        np.testing.assert_allclose(centered[:, j] / centered[:, 0], raw[:, j] / raw[:, 0], rtol=1e-10)
+
+    # The planted gain and loss are still on the correct side of 1.0.
+    assert np.all(centered[:, 2] > 1.2)
+    assert np.all(centered[:, 4] < 0.8)
+
+
+def test_center_chr_cnv_matrix_removes_a_planted_per_cell_offset():
+    """A known per-cell factor is removed, and only that factor.
+
+    The offset is what makes cells incomparable to each other at a fixed
+    chromosome; after centering, the same chromosome reads the same across cells
+    that differ only by their offset.
+    """
+    base, offsets, raw = _offset_matrix()
+    centered = center_chr_cnv_matrix(raw)
+
+    # Before: the row medians span the planted 0.8x-1.6x range.
+    assert np.ptp(np.median(raw, axis=1)) > 0.7
+    # After: they are identical, so the spread is gone.
+    assert np.ptp(np.median(centered, axis=1)) < 1e-12
+
+    # And centering recovers the offset-free matrix up to its own row medians —
+    # i.e. it removed the planted factor, not some of the biology with it.
+    expected = base / np.median(base, axis=1, keepdims=True)
+    np.testing.assert_allclose(centered, expected, rtol=1e-10)
+
+    # Ranking cells at a fixed chromosome is the use case this fixes: on the raw
+    # matrix the deepest-offset cell tops the gain column regardless of biology.
+    assert np.argmax(raw[:, 2]) == np.argmax(offsets[:, 0])
+    assert np.median(centered[:, 2]) > 1.2
+
+
+def test_center_chr_cnv_matrix_does_not_mutate_its_input():
+    """The raw matrix the CLI just wrote must not change underneath it."""
+    _, _, raw = _offset_matrix()
+    before = raw.copy()
+    center_chr_cnv_matrix(raw)
+    np.testing.assert_array_equal(raw, before)
+
+
+def test_center_chr_cnv_matrix_on_pedestal_fixture_keeps_the_planted_loss():
+    """End of the real path: centering the pedestal synthetic's chr matrix.
+
+    The scalar-pedestal correction leaves a per-cell spread behind (that is the
+    documented trade-off); centering removes it, and the planted loss survives.
+    """
+    cn_matrix, segments, seg_baseline, _, _, normal_mask, loss_label = _pedestal_pipeline_state()
+    chrom_order = ["chr_synth_1", "chr_synth_2", "chr_synth_3"]
+    chr_pedestal = float(np.median(seg_baseline))
+
+    raw, chroms = compute_chr_cnv_matrix(cn_matrix, segments, chrom_order, baseline=chr_pedestal)
+    centered = center_chr_cnv_matrix(raw)
+
+    # The raw file genuinely carries a per-cell spread — otherwise this is vacuous.
+    assert np.median(raw, axis=1).std() > 0.01
+    assert np.median(centered, axis=1).std() < 1e-12
+
+    # The planted loss is still a loss relative to the normals.
+    col = chroms.index(loss_label)
+    assert np.median(centered[~normal_mask, col]) < np.median(centered[normal_mask, col])
 
 
 def test_clones_seg_centered_on_zero_with_baseline(tmp_path):
