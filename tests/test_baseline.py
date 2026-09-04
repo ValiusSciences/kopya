@@ -24,22 +24,24 @@ from kopya.baseline import (
 )
 
 
-def _synthetic_signature_adata(n_normal=60, n_tumor=40, seed=0):
-    """Build an AnnData where the first n_normal cells have planted T-cell signal.
+def _synthetic_signature_adata(n_normal=60, n_tumor=40, seed=0, markers=None):
+    """Build an AnnData where the first n_normal cells have planted signature signal.
 
-    Cells 0..n_normal-1 get elevated counts on canonical T-cell markers
-    (CD3D/CD3E/CD3G/CD2/TRAC); the rest are diffuse low-signal noise. This
-    is the minimum structure needed for the signature baseline to fire
-    deterministically.
+    Cells 0..n_normal-1 get elevated counts on the planted marker set
+    (canonical T-cell markers by default); the rest are diffuse low-signal
+    noise. This is the minimum structure needed for the signature baseline to
+    fire deterministically.
 
     Args:
-        n_normal: Number of planted T-cell-like cells (the "normal" pool).
+        n_normal: Number of planted signature-positive cells (the "normal" pool).
         n_tumor: Number of background tumor-like cells.
         seed: RNG seed.
+        markers: Gene symbols to plant; defaults to the canonical T-cell set.
 
     Returns:
-        AnnData with log1p-style float values in .X. var_names include T-cell
-        markers plus a pool of generic gene IDs so the matrix is non-trivial.
+        AnnData with log1p-style float values in .X. var_names include the
+        planted markers plus a pool of generic gene IDs so the matrix is
+        non-trivial.
     """
     rng = np.random.default_rng(seed)
 
@@ -49,14 +51,15 @@ def _synthetic_signature_adata(n_normal=60, n_tumor=40, seed=0):
     # suppressed T-cell markers in tumor cells fall outside the rank cap
     # and are excluded from the score — replicating the real-data regime
     # where the signature is genuinely absent.
-    t_cell_markers = ["CD3D", "CD3E", "CD3G", "CD2", "TRAC",
-                      "TRBC1", "TRBC2", "CD8A", "CD8B", "CD4"]
+    planted_markers = markers if markers is not None else [
+        "CD3D", "CD3E", "CD3G", "CD2", "TRAC",
+        "TRBC1", "TRBC2", "CD8A", "CD8B", "CD4"]
     filler = [f"GENE{i:04d}" for i in range(2000)]
-    gene_names = t_cell_markers + filler
+    gene_names = planted_markers + filler
 
     n_cells = n_normal + n_tumor
     n_genes = len(gene_names)
-    n_markers = len(t_cell_markers)
+    n_markers = len(planted_markers)
 
     # Base diffuse expression on all genes (log1p-style).
     X = rng.uniform(0.0, 1.0, size=(n_cells, n_genes)).astype(np.float64)
@@ -256,6 +259,15 @@ def test_load_signatures_bundled():
     # non-malignant allow-list (it can be the malignancy in myeloma).
     assert "Plasma_cell" in signatures
     assert "Plasma_cell" not in labels
+    # Fibroblast is the same shape of exclusion: the signature stays defined so
+    # mesenchymal/ECM-like tumor cells still resolve to it and are therefore
+    # kept OUT of the seed, but it is not itself treated as normal.
+    assert "Fibroblast" in signatures
+    assert "Fibroblast" not in labels
+    # The other stromal labels are unaffected by that exclusion.
+    for name in ("T_cell", "B_cell", "NK_cell", "Myeloid", "Neutrophil",
+                 "Endothelial", "Pericyte", "Osteoblast", "Smooth_muscle"):
+        assert name in labels
     # Every allow-listed label resolves to a defined signature.
     assert set(labels).issubset(set(signatures))
 
@@ -326,6 +338,35 @@ def test_signature_baseline_respects_non_malignant_labels():
     # The effective allow-list is recorded in diagnostics for provenance.
     assert diag_keep["non_malignant_labels"] == ["T_cell"]
     assert diag_drop["non_malignant_labels"] == ["B_cell"]
+
+
+def test_fibroblast_winners_are_not_seeded_by_default():
+    """Cells that win the Fibroblast signature stay OUT of the default seed.
+
+    Mesenchymal / ECM-like tumor cells express the fibroblast program, so under
+    the old allow-list they entered the diploid seed and the tumor partly seeded
+    its own baseline. The signature is deliberately still defined: these cells
+    must keep resolving TO Fibroblast (rather than falling through to a stromal
+    label that IS allow-listed, e.g. Pericyte or Smooth_muscle), which is what
+    keeps them out. Re-adding the label restores the old behavior per-sample.
+    """
+    fibroblast_markers = ["COL1A1", "COL1A2", "COL3A1", "DCN", "LUM",
+                          "PDGFRA", "FAP", "POSTN", "FN1", "THY1"]
+    adata = _synthetic_signature_adata(
+        n_normal=60, n_tumor=40, markers=fibroblast_markers)
+
+    mask, diag = _signature_baseline(adata)
+
+    # They do clear the threshold, and Fibroblast is what they resolve to.
+    assert diag["per_label_counts"]["Fibroblast"] >= 50
+    # ... but none of them are admitted to the diploid seed.
+    assert int(mask.sum()) == 0
+    assert "Fibroblast" not in diag["non_malignant_labels"]
+
+    # The --non-malignant-labels escape hatch still recovers them for a sample
+    # whose stroma is genuinely fibroblast-rich.
+    readd, _ = _signature_baseline(adata, non_malignant_labels=["Fibroblast"])
+    assert int(readd.sum()) >= 50
 
 
 def test_signature_baseline_accepts_custom_signature_library():

@@ -770,8 +770,9 @@ per-chromosome bulk-exome Pearson collapses to 0.557 (vs 0.877 supervised).
 **Root cause: same-lineage, not a missing signature.** Osteosarcoma is a
 malignant *mesenchymal* (osteoblast/fibroblast) tumor. Its cells score high on
 the **normal** `Fibroblast` (+1.63) and `Osteoblast` (+1.28) signatures (both
-in the non-malignant allow-list), so ~28% of the confident-normal seed pool is
-actually tumor. The tumor thus seeds its own diploid baseline and the reference
+of which were in the non-malignant allow-list when this was measured; see the
+v4 entry in Section 7, which since dropped `Fibroblast` but kept `Osteoblast`),
+so ~28% of the confident-normal seed pool is actually tumor. The tumor thus seeds its own diploid baseline and the reference
 frame collapses. This is the same failure family as normal-astrocyte vs
 AC-like-glioma: expression alone cannot separate a mesenchymal tumor from its
 normal lineage of origin.
@@ -781,15 +782,56 @@ class (Neutrophils, 995 cells) *was* missing a signature; one was added
 (`normal_signatures.json` v3), and neutrophils are now recognized (score +1.1,
 tumor −0.5). But this does not de-invert the sample: adding clean normals to the
 seed cannot remove the tumor cells the Fibroblast/Osteoblast signatures pull in
-(unsupervised actually shifts ~7 to ~2 tumor cells). Dropping Fibroblast/
-Osteoblast from the allow-list would de-invert it but costs recall on genuinely
-fibroblast/osteoblast-rich normals elsewhere; not worth it.
+(unsupervised actually shifts ~7 to ~2 tumor cells). `Fibroblast` has since
+been dropped from the allow-list on cohort evidence (Section 7, v4), which
+removes half of that pull. `Osteoblast` is deliberately kept, so this sample is
+still expected to invert unsupervised and still runs supervised.
 
 **Fix path:** run supervised (`--norm-cell-names` / the `norm_cell_path`
 fixture) with the annotated non-tumor lineages, exactly as the osteosarcoma test
 does. For mesenchymal tumors, supervised is the intended mode, not a workaround.
 
 ## Section 7: Improvement History
+
+### 2026-09-03: Fibroblast dropped from the allow-list (normal_signatures.json v4)
+
+`Fibroblast` was removed from `_meta.non_malignant_labels`. The gene set is
+deliberately **kept** as a signature: admission to the seed is decided by the
+argmax signature, so a mesenchymal cell must keep resolving *to* `Fibroblast` in
+order to be excluded. Deleting the gene set instead would push those cells onto
+their next-best label (`Pericyte` / `Smooth_muscle` / `Endothelial`, which share
+ACTA2 and SPARC) and could pull them back into the seed. This is the same shape
+of exclusion `Plasma_cell` already had.
+
+**Why.** Mesenchymal / ECM-like tumor cells express the fibroblast program
+(COL1A1, COL3A1, POSTN, FN1, SPARC, VIM), win the `Fibroblast` signature, and so
+enter the confident-normal pool. The tumor then partly seeds its own diploid
+baseline, which flattens its own deviation and costs unsupervised sensitivity.
+
+**Measured on the 10X ovarian scFFPE benchmark** (the only unsupervised external
+case whose true-negative class contains fibroblasts, so the most exposed one).
+Both variants stay in `signature` mode and all three acceptance thresholds hold:
+
+| metric | Fibroblast allow-listed | Fibroblast dropped | threshold |
+|---|---|---|---|
+| malignant vs immune/stromal AUC | 0.9745 | 0.9745 | >= 0.85 |
+| immune/stromal false-tumor rate | 0.0262 | 0.0432 | <= 0.05 |
+| main tumor-state recall | 0.9756 | 0.9813 | >= 0.70 |
+| diploid seed size | 3,881 | 1,154 | >= 50 |
+
+2,727 of the 3,881 seed cells (70%) resolved to `Fibroblast`, so this sample is
+the maximal case for the change. AUC is unchanged and recall improves slightly.
+The cost is real and worth stating: the false-tumor rate rises from 2.6% to
+4.3%, narrowing the margin to the 5% cap from 2.4 points to 0.7. This sample's
+fibroblasts are genuine normal stroma (Tumor/Stromal Associated Fibroblasts), so
+removing them makes the baseline less representative of stroma. For samples like
+it, `--non-malignant-labels` adds the label back per-run.
+
+**Not tested here:** the other external datasets (DCIS1, Patel GBM, SCEVAN
+synthetic) were not re-run for this change, and DCIS1 is the one whose v1 to v2
+entry below credits the `Fibroblast` signature with a gain. `Osteoblast` was
+left in the allow-list, so the osteosarcoma inversion (Section 6.6) is
+unchanged and that sample still requires supervised mode.
 
 ### 2026-07-26: Neutrophil signature added (normal_signatures.json v3)
 

@@ -3,6 +3,23 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **`Fibroblast` is no longer an allowed normal reference in unsupervised mode**
+  (`normal_signatures.json` v4). Mesenchymal / ECM-like tumor cells express the
+  fibroblast program, won the `Fibroblast` signature, and so entered the
+  confident-normal pool, letting the tumor partly seed its own diploid baseline.
+  The `Fibroblast` gene set is still defined, so those cells keep resolving to it
+  and are kept out of the seed rather than falling through to an allow-listed
+  stromal label. Supervised runs (`--norm-cell-names`, or `reference_key` /
+  `reference_cat` in the API) are unaffected: they never consult the allow-list.
+  Samples whose normal stroma is genuinely fibroblast-rich can add the label back
+  with `--non-malignant-labels`. On the 10X ovarian scFFPE benchmark this leaves
+  AUC unchanged (0.9745), improves tumor recall (0.9756 to 0.9813), and raises
+  the immune/stromal false-tumor rate (0.0262 to 0.0432, cap 0.05).
+
 ## 2.0.0 — 2026-08-19
 
 > **Why major.** `tumor_score` changed meaning without changing its name or type, so
