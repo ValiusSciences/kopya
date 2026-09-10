@@ -281,7 +281,8 @@ All artifacts land under `--out-dir`:
 | File | Shape / Format | Purpose |
 |------|----------------|---------|
 | `prediction.csv` | cells × `{class, confidence, tumor_score, subclone, n_segments_altered, low_complexity}` | Per-cell call, in CopyKAT-style column semantics (a `prediction`/`class` column plus per-cell scores); `low_complexity` is appended last. Aligns with CopyKAT's per-cell prediction table so downstream consumers need little adaptation |
-| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss), in the same cells × chromosomes layout CopyKAT emits |
+| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss), in the same cells × chromosomes layout CopyKAT emits. Calibrated **up to a per-cell scale factor**: each cell's whole row carries an offset that cancels within a cell, leaves a pseudobulk factor-weighted rather than equally weighted, and does not cancel at all when cells are compared to each other at one chromosome — centre first for per-cell work (see [Per-cell offset](#the-per-cell-offset-in-chr_cnv_matrixcsv)) |
+| `chr_cnv_matrix_centered.csv` | cells × chromosomes | **Optional**, written only with `--centered-chr-matrix`. The same matrix with each cell's row divided by its own median chromosome, so cells are comparable at a fixed chromosome. `1.0` = that cell's median chromosome, **not** diploid — for visualization and relative per-cell reads, not absolute ploidy. Additive: the raw `chr_cnv_matrix.csv` is always written unchanged |
 | `{sample}_clones.seg` | IGV `.seg` | Per-clone consensus segments, loadable directly into IGV. Clone IDs prefixed with the sample name so multi-sample sessions stay disambiguated |
 | `segments.parquet` | per-segment summary (one row per segment) | The **segment-to-genome map**. Original columns `chr`, `start_idx`/`end_idx` (gene-axis indices, start inclusive/end exclusive), `n_genes`, `tumor_mean` (pooled-tumor log-deviation: `>0` gain, `<0` loss), plus three appended: `segment_id` (0-based key), `start_bp`/`end_bp` (genomic span of the segment, the min gene start and max gene end across its genes). `segment_id`/`start_bp`/`end_bp` make this self-contained: you can locate any segment without the source `adata.var`. Segment row `i` equals column `i` of `cn_per_segment.npz` |
 | `cn_per_segment.npz` | dense (cells × segments) | Per-cell × per-segment CN matrix (`cn`) plus `cell_barcodes`; column `i` corresponds to `segment_id == i` in `segments.parquet`. Stored **raw** (log-space, carries a per-gene pedestal + per-cell offset); re-center before plotting (see [How the signal is recovered](#visualize-the-calls-infercnv-style-heatmap)). Optimized for numpy consumers |
@@ -302,7 +303,8 @@ Different files center their values differently; this trips people up, so keep i
 
 | File | Scale | Diploid value | Negatives? |
 |------|-------|---------------|-----------|
-| `chr_cnv_matrix.csv` | 1.0-centered multiplicative ratio | `1.0` | no (always > 0) |
+| `chr_cnv_matrix.csv` | 1.0-centered multiplicative ratio | `1.0`, up to a per-cell factor | no (always > 0) |
+| `chr_cnv_matrix_centered.csv` (opt-in) | 1.0-centered multiplicative ratio, per-cell centered | `1.0` = the cell's median chromosome | no (always > 0) |
 | `segments.parquet` `tumor_mean` | natural-log deviation | `0` | **yes** |
 | `cn_per_segment.npz` | natural-log signal (raw; re-center first) | `~0` after re-centering | **yes** |
 | `{sample}_clones.seg` `seg.mean` | natural-log ratio vs normal reference | `0` | **yes** |
@@ -316,12 +318,38 @@ Different files center their values differently; this trips people up, so keep i
 
 The other outputs deliberately have **no** `_denoised` twin; they don't need one:
 
-- **`chr_cnv_matrix.csv`** is already aggregated to chromosome level, which averages per-segment noise toward 0 (it's why raw chr7 already reads ~1.8 in tumor vs ~1.0 in normal). Chromosome aggregation is itself a form of denoising, and this file uses a scalar pedestal to preserve bulk concordance.
+- **`chr_cnv_matrix.csv`** is already aggregated to chromosome level, which averages per-segment noise toward 0 (it's why raw chr7 already reads ~1.8 in tumor vs ~1.0 in normal). Chromosome aggregation is itself a form of denoising, and this file uses a scalar pedestal to preserve bulk concordance. Separately from denoise, it does keep the **per-cell offset** (a scalar pedestal is pool-wide, not per-cell); `--centered-chr-matrix` removes that, see [Per-cell offset](#the-per-cell-offset-in-chr_cnv_matrixcsv).
 - **`{sample}_clones.seg`** is a per-subclone *median* across cells (with the per-segment baseline already subtracted); a cross-cell median is a strong denoiser, so an explicit denoise would be roughly a no-op.
 - **`segments.parquet` `tumor_mean`** is a pooled summary vector, not a per-cell matrix; there is nothing per-cell to threshold.
 - **`prediction.csv`** holds calls/scores, not a signal matrix. (`tumor_score` is computed on the *raw* matrix, by design.)
 
 Want a denoised **chromosome-level** view? Aggregate the denoised per-segment matrix: denoise first, then length-weight-average per chromosome. Aggregating the raw matrix and denoising afterward is not equivalent; the order matters.
+
+#### The per-cell offset in `chr_cnv_matrix.csv`
+
+`chr_cnv_matrix.csv` is calibrated only **up to a per-cell scale factor**. The per-gene centering in step 3 leaves a positive pedestal on every cell — genes detected in ≤50% of the normal pool have a normal-median of 0 and pass through uncentered, so a cell's pedestal grows with how many genes it detected — and the scalar baseline subtracted at write time removes only the pool-wide part of it.
+
+What is left is a factor on a cell's **whole row**. It cancels exactly in one place: **within one cell** — a ratio between two chromosomes, or a ranking of a cell's own chromosomes.
+
+It does **not** cancel when cells are compared to each other at a fixed chromosome. On real data that offset correlates strongly with sequencing depth (Pearson `r ≈ 0.91` against `log10(n_counts)` on a 191k-cell glioblastoma sample) and can be larger than the per-chromosome biology, so a heatmap, ranking or clustering built on the raw values may be showing depth rather than copy number. Depth is a strong correlate and the detected-gene mechanism above explains it, but this is not a controlled demonstration that depth is the sole cause.
+
+**An average over cells does not cancel it either.** Write a raw value as `s_c × t_ck` (the cell's factor × the true ratio); a pseudobulk is then
+
+```
+mean_c(s_c · t_ck) = mean(s) · mean(t_k) + cov_c(s, t_k)
+```
+
+— a factor-weighted average, not the plain mean, and the two terms fail differently. `mean(s)` is one constant shared by every chromosome, so it rescales the profile without changing its shape: the per-chromosome Pearson this file is validated on is scale-invariant and therefore blind to it, which is why the matched-bulk concordance never flagged the offset — though it does mean a pseudobulk's absolute level is not diploid-calibrated. The `cov` term is the one that can bite: it bends the profile chromosome by chromosome whenever the per-cell factor correlates with a chromosome's value across the pooled cells — high-depth cells over-represented in the clone that carries an event, say. That has not shown up against matched bulk, but it is an empirical observation about these samples, not a mathematical guarantee.
+
+So: the raw file is right for **within-cell** work, and it remains the file validated against matched bulk — just read those pseudobulks as factor-weighted, not equally weighted. Centre first for a pseudobulk that should weight every cell equally, and for anything that ranks, sorts, colours or clusters **individual cells**. Either pass `--centered-chr-matrix` to get `chr_cnv_matrix_centered.csv`, or do it in one line:
+
+```python
+m = pd.read_csv("chr_cnv_matrix.csv", index_col="barcode")
+centered = m.div(m.median(axis=1), axis=0)   # what --centered-chr-matrix writes
+lg = np.log2(centered)                       # optional: symmetric scale for plotting
+```
+
+The trade-off is why this is opt-in rather than the default: centering makes `1.0` mean *this cell's median chromosome* instead of *diploid*. For a cell whose median chromosome is genuinely altered — a whole-genome doubling, or a tumor cell with most chromosomes gained — that misstates ploidy. The raw file keeps the absolute frame and stays the source of truth for copy-number level; the centered file is for visualization and relative per-cell interpretation. Note the classifier, `plot-heatmap` and `cn_per_segment_denoised.npz` all remove this offset internally, so calls in `prediction.csv` are unaffected by it.
 
 ### Example `qc.json`
 
@@ -410,8 +438,11 @@ Two colour scales:
 
 - `--scale log` (default): per-segment deviation in log-space, centered on 0.
 - `--scale linear`: copy-number **ratio** centered on 1.0 (diploid), matching
-  inferCNV's "Modified Expression" 0.8-1.2 convention and the 1.0-centered
-  `chr_cnv_matrix.csv` output.
+  inferCNV's "Modified Expression" 0.8-1.2 convention. Note this is *not* the
+  same frame as `chr_cnv_matrix.csv`, despite both reading "centered on 1.0":
+  the heatmap subtracts each cell's own median and the CSV does not.
+  `chr_cnv_matrix_centered.csv` (`--centered-chr-matrix`) is the chromosome-level
+  equivalent.
 
 On a glioblastoma sample the tumor panel shows the textbook GBM signature:
 solid **chr7 gain** and **chr10 loss**, plus chr12/18/19/20 gains, over a clean

@@ -43,6 +43,7 @@ from kopya.classify import (
 from kopya.heatmap import DEFAULT_MAX_OBS, DEFAULT_N_REF
 from kopya.io import load_counts
 from kopya.outputs import (
+    center_chr_cnv_matrix,
     compute_chr_cnv_matrix,
     segments_with_coordinates,
     write_chr_cnv_matrix_csv,
@@ -286,6 +287,18 @@ def cli():
          "--denoise-outputs.",
 )
 @option(
+    "--centered-chr-matrix/--no-centered-chr-matrix",
+    default=False,
+    show_default=True,
+    help="Additionally write chr_cnv_matrix_centered.csv: chr_cnv_matrix.csv with "
+         "each cell's row divided by its own median chromosome, removing the "
+         "per-cell offset so cells can be compared to each other at a fixed "
+         "chromosome. 1.0 then means the cell's median chromosome, not diploid — "
+         "for visualization and relative per-cell reads, not absolute ploidy. The "
+         "raw chr_cnv_matrix.csv is always written unchanged — this is an extra "
+         "file, never a replacement.",
+)
+@option(
     "--block-size",
     type=int,
     default=0,
@@ -325,6 +338,7 @@ def run(
     low_complexity_frac,
     denoise_outputs,
     sd_amplifier,
+    centered_chr_matrix,
     block_size,
 ):
     """Run the full kopya pipeline on one sample.
@@ -566,6 +580,28 @@ def run(
         out_path=out_path / "chr_cnv_matrix.csv",
     )
 
+    # chr_cnv_matrix_centered.csv — optional, purely additive. The same matrix
+    # with each cell's row divided by its own median chromosome, which is what a
+    # per-cell read of the file needs: the raw values carry a whole-row offset
+    # that on real data tracks sequencing depth and can outweigh the biology.
+    # The raw chr_cnv_matrix.csv is always written unchanged above; this never
+    # replaces it, and nothing in the pipeline consumes it (classification
+    # already ran, on cn_matrix).
+    #
+    # Always clear a stale copy first, for the same reason as the denoised
+    # matrix below: re-running the same --out-dir with the flag OFF must not
+    # leave a previous run's centered file beside freshly-written raw outputs.
+    centered_path = out_path / "chr_cnv_matrix_centered.csv"
+    centered_path.unlink(missing_ok=True)
+    if centered_chr_matrix:
+        write_chr_cnv_matrix_csv(
+            center_chr_cnv_matrix(chr_matrix),
+            barcodes=adata_m1.obs_names.to_numpy(),
+            chroms=chroms_present,
+            out_path=centered_path,
+        )
+        echo(f"[kopya]   wrote {centered_path.name} (per-cell centered)")
+
     # {sample}_clones.seg — IGV-loadable per-clone consensus.
     seg_path = write_clones_seg(
         cn_matrix=cn_matrix,
@@ -675,6 +711,7 @@ def run(
             "max_subclones": int(max_subclones),
             "coherence_gate": float(coherence_gate),
             "low_complexity_frac": float(low_complexity_frac),
+            "centered_chr_matrix": bool(centered_chr_matrix),
             "denoise_outputs": bool(denoise_outputs),
             "sd_amplifier": float(sd_amplifier) if denoise_outputs else None,
             "block_size": int(resolved_block),

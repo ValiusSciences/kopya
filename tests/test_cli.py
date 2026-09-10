@@ -467,6 +467,95 @@ def test_run_denoise_outputs_clears_stale(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TEST 8c: --centered-chr-matrix writes an additive per-cell-centered matrix
+# ---------------------------------------------------------------------------
+
+def test_run_centered_chr_matrix(tmp_path):
+    """The flag adds chr_cnv_matrix_centered.csv and changes nothing else.
+
+    Two runs of the same fixture, one with the flag and one without: the raw
+    chr_cnv_matrix.csv and the calls in prediction.csv must be byte-identical
+    between them, since the centered matrix is derived after classification and
+    is never read back.
+    """
+    if not FIXTURE_H5AD.exists():
+        pytest.skip(f"fixture not present at {FIXTURE_H5AD}")
+    on_dir, off_dir = tmp_path / "centered_on", tmp_path / "centered_off"
+    common = ["run", "--anndata", str(FIXTURE_H5AD), "--sample", "centered-sample"]
+
+    r_on = _run_cli(common + ["--out-dir", str(on_dir), "--centered-chr-matrix"])
+    assert r_on.returncode == 0, f"CLI failed:\n{r_on.stdout}\n{r_on.stderr}"
+    r_off = _run_cli(common + ["--out-dir", str(off_dir)])
+    assert r_off.returncode == 0, f"CLI failed:\n{r_off.stdout}\n{r_off.stderr}"
+
+    cen_path = on_dir / "chr_cnv_matrix_centered.csv"
+    assert cen_path.exists(), "chr_cnv_matrix_centered.csv not written"
+
+    # The existing raw output is untouched — compared as bytes, not values.
+    assert (on_dir / "chr_cnv_matrix.csv").read_bytes() == (off_dir / "chr_cnv_matrix.csv").read_bytes(), (
+        "--centered-chr-matrix must not alter chr_cnv_matrix.csv"
+    )
+
+    # Core kopya calls are unaffected.
+    call_cols = ["class", "confidence", "tumor_score", "subclone"]
+    pred_on = pd.read_csv(on_dir / "prediction.csv", index_col="barcode")
+    pred_off = pd.read_csv(off_dir / "prediction.csv", index_col="barcode")
+    pd.testing.assert_frame_equal(pred_on[call_cols], pred_off[call_cols])
+
+    raw = pd.read_csv(on_dir / "chr_cnv_matrix.csv", index_col="barcode")
+    cen = pd.read_csv(cen_path, index_col="barcode")
+
+    # Dimensions and identifiers are preserved.
+    assert list(cen.index) == list(raw.index)
+    assert list(cen.columns) == list(raw.columns)
+    assert cen.index.name == "barcode"
+
+    # The centering property, and the signal it must not have removed.
+    np.testing.assert_allclose(cen.median(axis=1).to_numpy(), 1.0, atol=1e-6)
+    assert (cen.to_numpy() > 0).all()
+    np.testing.assert_allclose(
+        (cen["chr7"] / cen["chr10"]).to_numpy(),
+        (raw["chr7"] / raw["chr10"]).to_numpy(),
+        rtol=1e-5,
+    )
+    # The fixture's planted chr7 gain still separates tumor from normal.
+    is_tum = (pred_on["class"] == "tumor").reindex(cen.index).to_numpy()
+    is_norm = (pred_on["class"] == "normal").reindex(cen.index).to_numpy()
+    assert is_tum.any() and is_norm.any()
+    assert cen["chr7"].to_numpy()[is_tum].mean() > cen["chr7"].to_numpy()[is_norm].mean()
+
+    qc = json.loads((on_dir / "qc.json").read_text())
+    assert qc["params"]["centered_chr_matrix"] is True
+
+
+def test_run_no_centered_chr_matrix_by_default(cli_run_output):
+    """Without the flag, no centered file is written and qc records it off."""
+    assert not (cli_run_output / "chr_cnv_matrix_centered.csv").exists()
+    qc = json.loads((cli_run_output / "qc.json").read_text())
+    assert qc["params"]["centered_chr_matrix"] is False
+
+
+def test_run_centered_chr_matrix_clears_stale(tmp_path):
+    """Re-running the same out-dir without the flag must remove a prior centered file.
+
+    Otherwise a stale matrix (old barcodes/dims) survives beside freshly-written
+    raw outputs and could be loaded as the current artifact.
+    """
+    if not FIXTURE_H5AD.exists():
+        pytest.skip(f"fixture not present at {FIXTURE_H5AD}")
+    out_dir = tmp_path / "stale_centered"
+    common = ["run", "--anndata", str(FIXTURE_H5AD), "--out-dir", str(out_dir), "--sample", "s"]
+
+    r1 = _run_cli(common + ["--centered-chr-matrix"])
+    assert r1.returncode == 0, f"{r1.stdout}\n{r1.stderr}"
+    assert (out_dir / "chr_cnv_matrix_centered.csv").exists()
+
+    r2 = _run_cli(common + ["--no-centered-chr-matrix"])
+    assert r2.returncode == 0, f"{r2.stdout}\n{r2.stderr}"
+    assert not (out_dir / "chr_cnv_matrix_centered.csv").exists()
+
+
+# ---------------------------------------------------------------------------
 # CellRanger input format helpers
 # ---------------------------------------------------------------------------
 

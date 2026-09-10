@@ -44,8 +44,12 @@ displays it — as a deviation relative to the reference cells:
 
 The result is a log-space deviation centered on 0 (``scale="log"``). Passing
 ``scale="linear"`` exponentiates it to a copy-number ratio centered on 1.0
-(diploid), matching the "Modified Expression" convention of inferCNV and the
-1.0-centered `chr_cnv_matrix.csv` output.
+(diploid), matching the "Modified Expression" convention of inferCNV.
+
+Not the same frame as `chr_cnv_matrix.csv`, despite both reading "centered on
+1.0": step 2 above is applied here and not there, so the CSV's values still
+carry each cell's own offset. `outputs.center_chr_cnv_matrix()` (CLI:
+``--centered-chr-matrix``) is the chromosome-level equivalent of that step.
 """
 
 from pathlib import Path

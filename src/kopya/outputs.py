@@ -7,11 +7,17 @@ Three artifacts:
         on 1.0 (gain > 1, loss < 1) matching CopyKAT's downstream convention.
     write_clones_seg(): IGV-loadable per-clone consensus .seg file. Genomic
         coordinates from var.chr/start/end; one row per (clone, segment).
+
+Plus one optional transform of the second artifact:
+    center_chr_cnv_matrix(): divide each cell's row by its own median chromosome,
+        removing the per-cell offset that compute_chr_cnv_matrix() leaves in. Used
+        by the CLI's --centered-chr-matrix to write chr_cnv_matrix_centered.csv
+        alongside — never instead of — the raw file.
 """
 
 from pathlib import Path
 
-from numpy import arange, asarray, empty, exp, full, median
+from numpy import arange, asarray, empty, exp, full, median, where
 from pandas import DataFrame, unique
 
 
@@ -108,9 +114,50 @@ def compute_chr_cnv_matrix(cn_matrix, segments, chrom_order, baseline=None):
             Removing that last per-chromosome residual would require the per-segment
             vector, which regresses the validated concordance, so it is left in.
 
+    Calibrated only up to a per-cell scale factor. The upstream per-gene
+    centering leaves a positive log pedestal on every cell — genes detected in
+    <=50% of the normal pool have a normal-median of 0 and pass through
+    uncentered, so a cell's pedestal grows with how many genes it detected — and
+    the scalar `baseline` above removes only the pool-wide part of it.
+
+    What survives is a factor on a cell's WHOLE row. It cancels exactly in one
+    place: a comparison made *within* one cell (a chromosome ratio, a per-cell
+    ranking of chromosomes). It does NOT cancel when cells are compared to each
+    other at a fixed chromosome: on real data that offset correlates strongly
+    with sequencing depth and can exceed the per-chromosome biology, so a
+    heatmap or ranking built on the raw values can show depth rather than copy
+    number. Anything that ranks, sorts or colours individual cells should call
+    center_chr_cnv_matrix() first.
+
+    An average taken *over* cells does not cancel it either. Writing a raw value
+    as s_c * t_ck (the cell's factor x the true ratio), a pseudobulk is
+
+        mean_c(s_c * t_ck) = mean(s) * mean(t_k) + cov_c(s, t_k)
+
+    — a factor-weighted average, not the plain mean, with two distinct
+    consequences. mean(s) is one constant shared by every chromosome, so it
+    rescales the profile without changing its shape; the per-chromosome Pearson
+    this file is graded on is scale-invariant and therefore blind to it, which
+    is why the matched-bulk metric never saw the offset — though it does mean a
+    pseudobulk's absolute level is not diploid-calibrated. The cov term is the
+    one that can bite: it bends the profile chromosome by chromosome whenever
+    the per-cell factor correlates with the chromosome's value across the pooled
+    cells (high-depth cells over-represented in the clone carrying an event,
+    say). That has not shown up against matched bulk, but the benchmark's
+    insensitivity is an empirical observation about these samples, not an
+    algebraic guarantee. For a pseudobulk that weights every cell equally, run
+    the rows through center_chr_cnv_matrix() first, then average.
+
+    Left in deliberately: the alternative is to make 1.0 mean "this cell's median
+    chromosome" instead of "diploid", which is a relative frame that cannot state
+    ploidy — a whole-genome doubling would be invisible by construction. This
+    function keeps the absolute frame; center_chr_cnv_matrix() offers the
+    relative one as a separate, additive output.
+
     Returns:
         (matrix, chroms_present):
-            matrix: (n_cells × n_chroms_present) ndarray, centered on 1.0.
+            matrix: (n_cells × n_chroms_present) ndarray, centered on 1.0
+                (up to the per-cell factor described above).
             chroms_present: list[str] of chromosomes that had at least one
                 segment, in chrom_order order.
     """
@@ -145,6 +192,51 @@ def compute_chr_cnv_matrix(cn_matrix, segments, chrom_order, baseline=None):
 
     one_centered = _logspace_to_one_centered(out)
     return one_centered, chroms_present
+
+
+def center_chr_cnv_matrix(matrix):
+    """Divide each cell's row by its own median chromosome.
+
+    The one operation that removes the per-cell offset described in
+    compute_chr_cnv_matrix(). Nothing else is applied — no log, no scaling, no
+    per-chromosome correction:
+
+        centered[cell, chrom] = matrix[cell, chrom] / median(matrix[cell, :])
+
+    The median is unweighted over the chromosome columns present. (heatmap.py's
+    _recenter() uses a gene-count-weighted median over *segments*; here the
+    segments have already been collapsed to one value per chromosome, and the
+    unweighted form is the one validated on the patient cohort.)
+
+    Output keeps the shape, dtype and 1.0-centered multiplicative scale of the
+    input, so it drops into any consumer that reads the raw matrix's *format*.
+    What does not carry over is the meaning of 1.0: the frame changes from
+    "diploid" to "this cell's median chromosome". Dividing a row by a constant
+    preserves every within-row ratio exactly, and with it the ordering of a
+    cell's chromosomes — but it does NOT preserve a diploid-relative call read
+    off a 1.0 threshold. A genuinely gained chromosome lands at or below 1.0
+    whenever the cell's median chromosome is gained too, and a whole-genome
+    doubling flattens to an all-1.0 row: invisible by construction. Use this for
+    visualization, per-cell ranking and relative CNV interpretation; keep the
+    raw matrix as the source of truth for absolute copy-number level. For a
+    symmetric plotting scale, take log2() of the result; that is a separate
+    transform and is left to the caller.
+
+    Args:
+        matrix: (n_cells × n_chroms) ndarray from compute_chr_cnv_matrix(),
+            on the 1.0-centered multiplicative scale (strictly positive).
+
+    Returns:
+        ndarray of the same shape and dtype, each row scaled so its median is 1.0.
+    """
+    values = asarray(matrix)
+    # keepdims so the (n_cells, 1) medians broadcast back over the chromosome axis.
+    row_medians = median(values, axis=1, keepdims=True)
+    # The input is exp()-derived and strictly positive, so a zero median can only
+    # come from a degenerate/empty input; leave those rows untouched rather than
+    # emitting inf/nan into a file consumers read as a ratio.
+    safe = where(row_medians == 0, 1.0, row_medians)
+    return (values / safe).astype(values.dtype, copy=False)
 
 
 def write_chr_cnv_matrix_csv(matrix, barcodes, chroms, out_path):
