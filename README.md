@@ -281,7 +281,7 @@ All artifacts land under `--out-dir`:
 | File | Shape / Format | Purpose |
 |------|----------------|---------|
 | `prediction.csv` | cells × `{class, confidence, tumor_score, subclone, n_segments_altered, low_complexity}` | Per-cell call, in CopyKAT-style column semantics (a `prediction`/`class` column plus per-cell scores); `low_complexity` is appended last. Aligns with CopyKAT's per-cell prediction table so downstream consumers need little adaptation |
-| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss), in the same cells × chromosomes layout CopyKAT emits. Calibrated **up to a per-cell scale factor**: each cell's whole row carries an offset that cancels within a cell and across a pseudobulk, but not when cells are compared to each other at one chromosome — centre first for per-cell work (see [Value scales](#value-scales-at-a-glance)) |
+| `chr_cnv_matrix.csv` | cells × chromosomes | Per-chromosome CN summary, centered on 1.0 (`>1` gain, `<1` loss), in the same cells × chromosomes layout CopyKAT emits. Calibrated **up to a per-cell scale factor**: each cell's whole row carries an offset that cancels within a cell, leaves a pseudobulk factor-weighted rather than equally weighted, and does not cancel at all when cells are compared to each other at one chromosome — centre first for per-cell work (see [Per-cell offset](#the-per-cell-offset-in-chr_cnv_matrixcsv)) |
 | `chr_cnv_matrix_centered.csv` | cells × chromosomes | **Optional**, written only with `--centered-chr-matrix`. The same matrix with each cell's row divided by its own median chromosome, so cells are comparable at a fixed chromosome. `1.0` = that cell's median chromosome, **not** diploid — for visualization and relative per-cell reads, not absolute ploidy. Additive: the raw `chr_cnv_matrix.csv` is always written unchanged |
 | `{sample}_clones.seg` | IGV `.seg` | Per-clone consensus segments, loadable directly into IGV. Clone IDs prefixed with the sample name so multi-sample sessions stay disambiguated |
 | `segments.parquet` | per-segment summary (one row per segment) | The **segment-to-genome map**. Original columns `chr`, `start_idx`/`end_idx` (gene-axis indices, start inclusive/end exclusive), `n_genes`, `tumor_mean` (pooled-tumor log-deviation: `>0` gain, `<0` loss), plus three appended: `segment_id` (0-based key), `start_bp`/`end_bp` (genomic span of the segment, the min gene start and max gene end across its genes). `segment_id`/`start_bp`/`end_bp` make this self-contained: you can locate any segment without the source `adata.var`. Segment row `i` equals column `i` of `cn_per_segment.npz` |
@@ -329,14 +329,19 @@ Want a denoised **chromosome-level** view? Aggregate the denoised per-segment ma
 
 `chr_cnv_matrix.csv` is calibrated only **up to a per-cell scale factor**. The per-gene centering in step 3 leaves a positive pedestal on every cell — genes detected in ≤50% of the normal pool have a normal-median of 0 and pass through uncentered, so a cell's pedestal grows with how many genes it detected — and the scalar baseline subtracted at write time removes only the pool-wide part of it.
 
-What is left is a factor on a cell's **whole row**. It cancels:
-
-- **within one cell** — a ratio between two chromosomes, or a ranking of a cell's own chromosomes;
-- **across cells** — any pseudobulk or per-chromosome average over cells, which is how this file is validated against matched bulk.
+What is left is a factor on a cell's **whole row**. It cancels exactly in one place: **within one cell** — a ratio between two chromosomes, or a ranking of a cell's own chromosomes.
 
 It does **not** cancel when cells are compared to each other at a fixed chromosome. On real data that offset correlates strongly with sequencing depth (Pearson `r ≈ 0.91` against `log10(n_counts)` on a 191k-cell glioblastoma sample) and can be larger than the per-chromosome biology, so a heatmap, ranking or clustering built on the raw values may be showing depth rather than copy number. Depth is a strong correlate and the detected-gene mechanism above explains it, but this is not a controlled demonstration that depth is the sole cause.
 
-So: use the raw file as-is for pseudobulk and within-cell work, and centre first for anything that ranks, sorts, colours or clusters **individual cells**. Either pass `--centered-chr-matrix` to get `chr_cnv_matrix_centered.csv`, or do it in one line:
+**An average over cells does not cancel it either.** Write a raw value as `s_c × t_ck` (the cell's factor × the true ratio); a pseudobulk is then
+
+```
+mean_c(s_c · t_ck) = mean(s) · mean(t_k) + cov_c(s, t_k)
+```
+
+— a factor-weighted average, not the plain mean, and the two terms fail differently. `mean(s)` is one constant shared by every chromosome, so it rescales the profile without changing its shape: the per-chromosome Pearson this file is validated on is scale-invariant and therefore blind to it, which is why the matched-bulk concordance never flagged the offset — though it does mean a pseudobulk's absolute level is not diploid-calibrated. The `cov` term is the one that can bite: it bends the profile chromosome by chromosome whenever the per-cell factor correlates with a chromosome's value across the pooled cells — high-depth cells over-represented in the clone that carries an event, say. That has not shown up against matched bulk, but it is an empirical observation about these samples, not a mathematical guarantee.
+
+So: the raw file is right for **within-cell** work, and it remains the file validated against matched bulk — just read those pseudobulks as factor-weighted, not equally weighted. Centre first for a pseudobulk that should weight every cell equally, and for anything that ranks, sorts, colours or clusters **individual cells**. Either pass `--centered-chr-matrix` to get `chr_cnv_matrix_centered.csv`, or do it in one line:
 
 ```python
 m = pd.read_csv("chr_cnv_matrix.csv", index_col="barcode")

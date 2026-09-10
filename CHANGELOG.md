@@ -22,8 +22,10 @@ All notable changes to this project are documented here. Versions follow
   calibrated only up to a per-cell scale factor: the per-gene centering leaves a
   pedestal that scales with how many genes a cell detected, and the scalar
   baseline subtracted at write time removes only the pool-wide part. The residual
-  cancels within a cell and across a pseudobulk — which is why the matched-bulk
-  concordance never saw it — but not when cells are compared to each other at one
+  cancels within a cell; across cells it makes a pseudobulk a factor-weighted
+  average rather than a plain mean, which the scale-invariant per-chromosome
+  Pearson cannot see — hence the matched-bulk concordance never flagged it — and
+  it does not cancel at all when cells are compared to each other at one
   chromosome, where it correlates strongly with sequencing depth and can exceed
   the per-chromosome biology. The README, the `compute_chr_cnv_matrix` docstring
   and the results notebook now say so and point at the one-line fix; the notebook

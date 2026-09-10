@@ -358,12 +358,17 @@ def test_center_chr_cnv_matrix_row_medians_are_one():
 
 
 def test_center_chr_cnv_matrix_preserves_shape_ids_and_within_row_ratios():
-    """Dividing a row by a constant cannot add or remove chromosome-level signal.
+    """A row divided by a constant keeps every within-row ratio and its layout.
 
-    This is what makes the centered file safe: the ratio between any two
-    chromosomes of the same cell — which is where a gain or loss actually lives —
-    comes through untouched, and the matrix keeps its shape and dtype so the
-    barcodes/columns written beside it still line up.
+    The narrow invariant this asserts: the ratio between any two chromosomes of
+    the same cell comes through untouched, so a cell's chromosomes keep their
+    relative magnitudes and order, and the matrix keeps its shape and dtype so
+    the barcodes/columns written beside it still line up. It does *not* assert
+    that diploid-relative calls survive — 1.0 means the row median in the
+    centered file, so an absolutely gained chromosome can land at or below it
+    (test_center_chr_cnv_matrix_row_medians_are_one pins that frame change).
+    The planted gain/loss checks below hold because the planted row median is
+    itself neutral, not because thresholding is frame-independent.
     """
     _, _, raw = _offset_matrix()
     centered = center_chr_cnv_matrix(raw)
