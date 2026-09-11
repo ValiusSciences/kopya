@@ -34,6 +34,19 @@ All notable changes to this project are documented here. Versions follow
   note in the README), which said the recentered heatmap shares the "1.0-centered"
   frame of `chr_cnv_matrix.csv`. The heatmap subtracts each cell's own median;
   the CSV does not.
+- **Documented high ambient RNA as a distinct failure mode.** Ambient RNA is
+  additive background present in every cell, while copy number is read as a ratio
+  against the diploid pool, so it lands on both sides of that ratio and attenuates
+  real deviations by roughly `(1 - rho)` instead of creating false ones — with or
+  without CP10k. The README now says how to recognise it from `qc.json` alone (a
+  compressed `tumor_signal_max_abs` with a large `n_normal_seed`,
+  `baseline_diagnostics.per_label_counts` dominated by one label, a high
+  `baseline_diagnostics.median_top_score`), how the tells overlap with an inverted
+  baseline, when correction is and is not worth running, and that integer-rounded
+  corrected counts can deliver well under the estimated `rho`. On a 12-sample
+  internal cohort (`rho` 0.033 to 0.737) correction moved median AUC by +0.003 and
+  improved matched-bulk concordance in 3 of 11 scorable samples; only the one
+  sample above `rho` 0.5 gained materially.
 
 ### Changed
 

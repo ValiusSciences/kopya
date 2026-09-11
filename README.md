@@ -274,6 +274,26 @@ kopya run --anndata processed_ad.h5ad --out-dir results/ --sample my-sample \
 
 **Lighter-weight alternative.** If you don't have curated barcodes but you *do* know the cascade is picking the wrong cell type as normal, you can keep the unsupervised cascade and just retune which signatures count as "normal", e.g. `--non-malignant-labels T_cell,B_cell,Endothelial,NK_cell` to exclude the mesenchymal labels, or supply a whole custom `--signatures` library. See [Optional inputs](#optional-inputs).
 
+## High ambient RNA
+
+Ambient RNA — free-floating transcripts counted into every droplet — is the same background added to every cell, and kopya reads copy number as a *ratio* against the diploid pool. Adding the same background to both sides of that ratio pushes it toward 1, so a real deviation is attenuated by roughly `(1 - rho)`, where `rho` is the ambient fraction. **The CNV is still there, just fainter.** This is not a normalization artifact — it would happen with or without CP10k, because ambient is additive while copy number is a ratio. (Distinct from the `low_complexity` flag, which marks individual empty-droplet-like *barcodes*; this is background mixed into every cell, including the good ones.)
+
+**How to spot it, without an ambient estimate,** from `qc.json` alone:
+
+- A compressed `tumor_signal_max_abs` alongside an implausibly large `n_normal_seed`.
+- `baseline_diagnostics.per_label_counts` dominated by a single label.
+- A high `baseline_diagnostics.median_top_score`: cells match one signature strongly because they all look alike.
+
+The first of these is also the inverted-baseline tell from [When to use supervised mode](#when-to-use-supervised-mode) — the two failure modes push the same dials, and heavy ambient makes an inversion more likely, so read the two sections together rather than treating the tells as independent. Note that `per_label_counts` and `median_top_score` are written only when `baseline_method` is `signature`; they are absent on `supervised`, `variance` and `gmm_fallback` runs.
+
+**What to do:**
+
+- **Routine contamination (`rho` up to ~0.2): don't pre-correct.** Instead make sure a mesenchymal label is not seeding the baseline — `Fibroblast` is no longer allow-listed by default, which addresses the common case directly (see [Optional inputs](#optional-inputs)).
+- **Extreme contamination (`rho` above ~0.5): correction is worth it**, and supervised mode alone will not rescue it. The ambient sits in the reference cells and the tumor alike, so subtracting even a perfect reference subtracts mostly ambient.
+- **If you do correct, check what was actually delivered rather than the reported `rho`.** Some pipelines round corrected counts back to integers, which erases sub-0.5 per-entry subtractions. Across our sub-`rho`-0.2 samples the delivered fraction was a median ~60% of the estimate, and as little as a third in the worst cases.
+
+**What we measured.** On a 12-sample internal cohort spanning `rho` 0.033 to 0.737, with the current default allow-list, feeding ambient-corrected counts changed median AUC by +0.003 and improved matched-bulk concordance in only 3 of 11 scorable samples (median -0.007). Only the single sample above `rho` 0.5 gained materially (+0.10 AUC), and it also carries the cohort's weakest ground truth, so treat the ~0.5 threshold as indicative, not calibrated. Measured per-cell CN amplitude scaled as `1 / (1 - delivered ambient fraction)`, Pearson 0.99 across samples. This cohort is internal and is not reproducible from this repository, unlike the public datasets under [Validation](#validation).
+
 ## Outputs
 
 All artifacts land under `--out-dir`:
