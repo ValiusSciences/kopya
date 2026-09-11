@@ -27,6 +27,6 @@ from kopya.pipeline import run_pipeline
 # Single source of truth for the package version: pyproject.toml reads this at build
 # time via [tool.hatch.version]. Bump it here, and retitle CHANGELOG.md's top section
 # to match, when cutting a release.
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 __all__ = ["tl", "pl", "load_counts", "run_pipeline", "__version__"]
