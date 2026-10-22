@@ -41,7 +41,7 @@ from kopya.classify import (
     classify_cells,
 )
 from kopya.heatmap import DEFAULT_MAX_OBS, DEFAULT_N_REF
-from kopya.io import ATERA_MATRIX_ZIP, load_counts
+from kopya.io import ATERA_MATRIX_CANDIDATES, load_counts
 from kopya.outputs import (
     center_chr_cnv_matrix,
     compute_chr_cnv_matrix,
@@ -825,11 +825,9 @@ def find_inputs(patient_dir, sample, out_dir):
         root / "outs" / "cell_feature_matrix.h5",
         root / "cell_feature_matrix.h5",
     ]
-    # Released Atera bundles (Onboard Analysis v1.0+) ship only a zarr matrix.
-    ATERA_CANDIDATES = [
-        root / "outs" / ATERA_MATRIX_ZIP,
-        root / ATERA_MATRIX_ZIP,
-    ]
+    # Released Atera bundles (Onboard Analysis v1.0+) ship only a zarr matrix,
+    # zipped as 10x ships it or unzipped by the user.
+    ATERA_CANDIDATES = [root / c for c in ATERA_MATRIX_CANDIDATES]
     # Loupe file detection — not usable, but we can give a helpful message.
     LOUPE_CANDIDATES = list(root.glob("**/*.cloupe"))
 
@@ -933,10 +931,13 @@ def find_inputs(patient_dir, sample, out_dir):
     for candidate in ATERA_CANDIDATES:
         if not candidate.exists():
             continue
-        size_mb = candidate.stat().st_size / 1e6
+        if candidate.is_dir():
+            detail = "unzipped"
+        else:
+            detail = f"{candidate.stat().st_size / 1e6:.0f} MB"
         echo(
             f"  [found] {candidate.relative_to(root)} — "
-            f"Atera count matrix (zarr), {size_mb:.0f} MB"
+            f"Atera count matrix (zarr), {detail}"
             + (" ✓ preferred" if chosen_atera is None else "")
         )
         if chosen_atera is None:
@@ -1056,7 +1057,7 @@ def find_inputs(patient_dir, sample, out_dir):
             "  Form C: <dir>/outs/filtered_feature_bc_matrix/  (CellRanger MTX)\n"
             "  Form D: <dir>/outs/filtered_feature_bc_matrix.h5  (CellRanger H5)\n"
             "          <dir>/outs/cell_feature_matrix.h5  (Xenium / Atera preview)\n"
-            "  Form E: <dir>/outs/cell_feature_matrix.zarr.zip  (Atera)\n"
+            "  Form E: <dir>/outs/cell_feature_matrix.zarr.zip  (Atera; or unzipped .zarr)\n"
             "  Form A: <dir>/**/raw_counts_ad.h5ad  (or any .h5ad)\n"
             "  Form B: <dir>/**/normalization/{counts.mtx,obs.csv,var.csv}\n\n"
             "Note: .cloupe files are not supported. Use the .h5 or MTX output\n"

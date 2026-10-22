@@ -818,6 +818,18 @@ def test_find_inputs_detects_atera_bundle(tmp_path):
     assert "--atera" in result.stdout
 
 
+def test_find_inputs_detects_unzipped_atera_store(tmp_path):
+    """find-inputs recommends --atera for an Atera bundle whose matrix was unzipped."""
+    store = tmp_path / "patient" / "outs" / "cell_feature_matrix.zarr"
+    store.mkdir(parents=True)
+
+    result = _run_cli(["find-inputs", "--patient-dir", str(tmp_path / "patient")])
+
+    assert result.returncode == 0, result.stderr
+    assert "unzipped" in result.stdout
+    assert "--atera" in result.stdout
+
+
 def test_find_inputs_detects_xenium_style_h5(tmp_path):
     """find-inputs recommends --cellranger-h5 for a Xenium / Atera preview cell_feature_matrix.h5."""
     outs = tmp_path / "patient" / "outs"

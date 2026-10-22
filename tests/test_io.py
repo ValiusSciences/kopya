@@ -355,6 +355,44 @@ def test_load_atera_unzipped_store(tmp_path):
     _assert_matches_source(load_counts(atera=store_dir), source)
 
 
+def test_load_atera_bundle_with_unzipped_store_under_outs(tmp_path):
+    """Form E finds an unzipped store under outs/ when given the bundle directory."""
+    from tests.conftest import write_atera_store
+
+    source = _atera_source()
+    write_atera_store(source, tmp_path / "bundle" / "outs", as_zip=False)
+
+    _assert_matches_source(load_counts(atera=tmp_path / "bundle"), source)
+
+
+def test_atera_fixture_interleaves_controls(tmp_path):
+    """Guard on the fixture itself: controls sit between genes, not after them.
+
+    Otherwise a loader that kept the first n_genes columns would pass every
+    count comparison above without ever reading feature_type.
+    """
+    from anndata import read_zarr
+    from tests.conftest import write_atera_store
+
+    store_dir = write_atera_store(_atera_source(), tmp_path, as_zip=False)
+    types = read_zarr(store_dir).var["feature_type"].tolist()
+    first_control = types.index(next(t for t in types if t != "Gene Expression"))
+
+    assert first_control < types.count("Gene Expression")
+    assert types[-1] == "Gene Expression"
+
+
+def test_load_counts_positional_raw_count_check_still_works(tmp_path):
+    """Adding Form E kept raw_count_check's position: old positional calls are unchanged."""
+    counts, obs, var = _make_tiny_counts()
+    h5ad_path = tmp_path / "tiny.h5ad"
+    AnnData(X=counts, obs=obs, var=var).write_h5ad(h5ad_path)
+
+    adata = load_counts(h5ad_path, None, None, None, None, None, "raise")
+
+    assert adata.shape == counts.shape
+
+
 def test_load_atera_missing_element_names_it(tmp_path):
     """A store lacking a required element fails with that element's name."""
     from anndata import read_zarr

@@ -51,16 +51,26 @@ def write_atera_store(adata, out_dir, as_zip=True):
     n_cells = adata.n_obs
     rng = np.random.default_rng(7)
 
-    # One feature of each control type, with a few counts so dropping them is visible.
-    n_ctrl = len(ATERA_CONTROL_TYPES)
+    # One feature of each control type, with a few counts so dropping them is
+    # visible, placed between genes (not after them) so a loader that kept the
+    # first n_genes columns instead of filtering on feature_type would fail.
+    n_genes, n_ctrl = adata.n_vars, len(ATERA_CONTROL_TYPES)
     ctrl = csr_matrix(rng.poisson(0.5, size=(n_cells, n_ctrl)))
     X = hstack([csr_matrix(adata.X), ctrl], format="csr")
-    X.indices = X.indices.astype(np.int64)  # the released format stores int64 indices
-
     names = [str(g) for g in adata.var_names] + [f"CTRL_{i}" for i in range(n_ctrl)]
+    types = ["Gene Expression"] * n_genes + list(ATERA_CONTROL_TYPES)
+
+    order = list(range(n_genes))
+    for j in range(n_ctrl):  # control j goes in after gene (j+1)*n_genes/(n_ctrl+1)
+        order.insert((j + 1) * n_genes // (n_ctrl + 1) + j, n_genes + j)
+    X = X[:, order].tocsr()
+    X.indices = X.indices.astype(np.int64)  # the released format stores int64 indices
+    names = [names[i] for i in order]
+    types = [types[i] for i in order]
+
     var = pd.DataFrame({
         "feature_name": names,
-        "feature_type": ["Gene Expression"] * adata.n_vars + list(ATERA_CONTROL_TYPES),
+        "feature_type": types,
         "feature_id": [f"ENSG_{g}" for g in names],
     }, index=[str(i) for i in range(len(names))])
     obs = pd.DataFrame({
@@ -70,9 +80,17 @@ def write_atera_store(adata, out_dir, as_zip=True):
     }, index=[str(i) for i in range(n_cells)])
 
     store_dir = out_dir / "cell_feature_matrix.zarr"
-    if hasattr(anndata, "settings") and hasattr(anndata.settings, "zarr_write_format"):
-        anndata.settings.zarr_write_format = 2  # 10x writes zarr v2
-    AnnData(X=X, obs=obs, var=var).write_zarr(store_dir)
+    # 10x writes zarr v2. Set it for this write only, so other tests see
+    # anndata's own default.
+    settings = getattr(anndata, "settings", None)
+    previous = getattr(settings, "zarr_write_format", None)
+    if previous is not None:
+        settings.zarr_write_format = 2
+    try:
+        AnnData(X=X, obs=obs, var=var).write_zarr(store_dir)
+    finally:
+        if previous is not None:
+            settings.zarr_write_format = previous
     if not as_zip:
         return store_dir
     # 10x zips the store's contents (keys at the archive root, no top folder).

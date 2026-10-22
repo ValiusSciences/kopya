@@ -41,6 +41,14 @@ from kopya.normalize import validate_raw_counts
 # File name of the count matrix inside an Atera Onboard Analysis output bundle.
 ATERA_MATRIX_ZIP = "cell_feature_matrix.zarr.zip"
 
+# Where the matrix can sit inside a bundle directory, in order of preference:
+# the zip as 10x ships it, then a store someone unzipped, each at the bundle
+# root or under outs/. Shared with find-inputs so the two never disagree.
+ATERA_MATRIX_CANDIDATES = (
+    ATERA_MATRIX_ZIP, f"outs/{ATERA_MATRIX_ZIP}",
+    "cell_feature_matrix.zarr", "outs/cell_feature_matrix.zarr",
+)
+
 # Elements an Atera matrix store must carry for _load_atera to read it. Checked
 # up front so a future format change fails with the missing names rather than
 # a KeyError from deep inside the read.
@@ -184,8 +192,8 @@ def _resolve_atera_path(path):
     """Return the Atera matrix store inside ``path``.
 
     Accepts the cell_feature_matrix.zarr.zip itself, an unzipped .zarr
-    directory, or an output bundle directory that holds the zip (directly or
-    under outs/).
+    directory, or an output bundle directory that holds either one (directly
+    or under outs/). The zip is preferred when both are present.
 
     Args:
         path: Path given on the command line or to load_counts.
@@ -198,13 +206,14 @@ def _resolve_atera_path(path):
     """
     if path.is_file() or path.suffix == ".zarr":
         return path
-    for candidate in (path / ATERA_MATRIX_ZIP, path / "outs" / ATERA_MATRIX_ZIP,
-                      path / "cell_feature_matrix.zarr"):
+    for relative in ATERA_MATRIX_CANDIDATES:
+        candidate = path / relative
         if candidate.exists():
             return candidate
     raise FileNotFoundError(
-        f"No {ATERA_MATRIX_ZIP} found in {path} or {path / 'outs'}. Pass the Atera "
-        "output directory or the matrix file itself."
+        f"No {ATERA_MATRIX_ZIP} (or unzipped cell_feature_matrix.zarr) found in "
+        f"{path} or {path / 'outs'}. Pass the Atera output directory or the matrix "
+        "itself."
     )
 
 
@@ -290,8 +299,8 @@ def _load_atera(atera_path):
 
 
 def load_counts(anndata=None, counts=None, obs=None, var=None,
-                cellranger_dir=None, cellranger_h5=None, atera=None,
-                raw_count_check="warn"):
+                cellranger_dir=None, cellranger_h5=None,
+                raw_count_check="warn", *, atera=None):
     """Load raw single-cell UMI counts into an AnnData.
 
     Exactly one input form must be supplied:
@@ -310,7 +319,9 @@ def load_counts(anndata=None, counts=None, obs=None, var=None,
         cellranger_h5: Path to a filtered_feature_bc_matrix.h5 or Xenium-style
             cell_feature_matrix.h5 file (Form D).
         atera: Path to an Atera Onboard Analysis output directory, its
-            cell_feature_matrix.zarr.zip, or an unzipped .zarr directory (Form E).
+            cell_feature_matrix.zarr.zip, or an unzipped .zarr directory
+            (Form E). Keyword-only, so existing positional calls that pass
+            raw_count_check keep working.
         raw_count_check: How to react when a Form-A .h5ad supplies .X that does
             not look like raw integer UMI counts and has no layers["counts"].
             "warn" (default) emits a UserWarning, "raise" errors out (opt-in
