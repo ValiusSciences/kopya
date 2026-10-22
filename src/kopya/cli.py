@@ -41,7 +41,7 @@ from kopya.classify import (
     classify_cells,
 )
 from kopya.heatmap import DEFAULT_MAX_OBS, DEFAULT_N_REF
-from kopya.io import load_counts
+from kopya.io import ATERA_MATRIX_CANDIDATES, load_counts
 from kopya.outputs import (
     center_chr_cnv_matrix,
     compute_chr_cnv_matrix,
@@ -92,7 +92,15 @@ def cli():
     "--cellranger-h5",
     type=ClickPath(exists=True, dir_okay=False),
     default=None,
-    help="Path to a CellRanger filtered_feature_bc_matrix.h5 file (Form D).",
+    help="Path to a CellRanger filtered_feature_bc_matrix.h5 file (Form D). Also "
+         "reads Xenium and Atera WTA preview cell_feature_matrix.h5 files.",
+)
+@option(
+    "--atera",
+    type=ClickPath(exists=True),
+    default=None,
+    help="Path to a 10x Atera Onboard Analysis (v1.0+) output directory or its "
+         "cell_feature_matrix.zarr.zip (Form E).",
 )
 @option(
     "--counts",
@@ -312,6 +320,7 @@ def run(
     anndata,
     cellranger_dir,
     cellranger_h5,
+    atera,
     counts,
     obs,
     var,
@@ -370,6 +379,7 @@ def run(
         counts=counts, obs=obs, var=var,
         cellranger_dir=cellranger_dir,
         cellranger_h5=cellranger_h5,
+        atera=atera,
         raw_count_check=raw_count_check,
     )
     load_secs = time.time() - t0
@@ -779,11 +789,12 @@ def run(
 def find_inputs(patient_dir, sample, out_dir):
     """Locate kopya input files inside a patient directory tree.
 
-    Searches for any of the four accepted input forms — CellRanger MTX directory
-    (Form C) or H5 (Form D), an AnnData .h5ad (Form A), or a counts.mtx + obs.csv
-    + var.csv trio (Form B) — following common single-cell pipeline output
-    layouts. Prints the best candidate found and the ready-to-run 'kopya run'
-    command.
+    Searches for any of the five accepted input forms — CellRanger MTX directory
+    (Form C) or H5 (Form D, including Xenium-style cell_feature_matrix.h5), an
+    Atera output bundle (Form E), an AnnData .h5ad (Form A), or a counts.mtx +
+    obs.csv + var.csv trio (Form B) — following common single-cell pipeline
+    output layouts. Prints the best candidate found and the ready-to-run
+    'kopya run' command.
     """
     import anndata
 
@@ -809,7 +820,14 @@ def find_inputs(patient_dir, sample, out_dir):
         root / "filtered_feature_bc_matrix.h5",
         root / "outs" / "raw_feature_bc_matrix.h5",
         root / "raw_feature_bc_matrix.h5",
+        # Xenium and the Atera WTA preview datasets write the same H5 layout
+        # under this name.
+        root / "outs" / "cell_feature_matrix.h5",
+        root / "cell_feature_matrix.h5",
     ]
+    # Released Atera bundles (Onboard Analysis v1.0+) ship only a zarr matrix,
+    # zipped as 10x ships it or unzipped by the user.
+    ATERA_CANDIDATES = [root / c for c in ATERA_MATRIX_CANDIDATES]
     # Loupe file detection — not usable, but we can give a helpful message.
     LOUPE_CANDIDATES = list(root.glob("**/*.cloupe"))
 
@@ -895,15 +913,35 @@ def find_inputs(patient_dir, sample, out_dir):
     for candidate in CELLRANGER_H5_CANDIDATES:
         if not candidate.exists():
             continue
-        label = "filtered" if "filtered" in candidate.name else "raw"
+        if candidate.name == "cell_feature_matrix.h5":
+            label = "Xenium / Atera preview H5"
+        else:
+            label = "CellRanger H5 (" + ("filtered" if "filtered" in candidate.name else "raw") + ")"
         size_mb = candidate.stat().st_size / 1e6
         echo(
             f"  [found] {candidate.relative_to(root)} — "
-            f"CellRanger H5 ({label}), {size_mb:.0f} MB"
+            f"{label}, {size_mb:.0f} MB"
             + (" ✓ preferred" if chosen_cellranger_h5 is None else "")
         )
         if chosen_cellranger_h5 is None:
             chosen_cellranger_h5 = candidate
+
+    # ── Evaluate Atera bundles ───────────────────────────────────────────────
+    chosen_atera = None
+    for candidate in ATERA_CANDIDATES:
+        if not candidate.exists():
+            continue
+        if candidate.is_dir():
+            detail = "unzipped"
+        else:
+            detail = f"{candidate.stat().st_size / 1e6:.0f} MB"
+        echo(
+            f"  [found] {candidate.relative_to(root)} — "
+            f"Atera count matrix (zarr), {detail}"
+            + (" ✓ preferred" if chosen_atera is None else "")
+        )
+        if chosen_atera is None:
+            chosen_atera = candidate
 
     # ── Warn about Loupe files ────────────────────────────────────────────────
     for loupe in LOUPE_CANDIDATES:
@@ -953,7 +991,7 @@ def find_inputs(patient_dir, sample, out_dir):
                 chosen_mtx = trio
 
     # ── Decision + suggested command ─────────────────────────────────────────
-    # Priority: CellRanger MTX > CellRanger H5 > h5ad > MTX trio.
+    # Priority: CellRanger MTX > CellRanger H5 > Atera > h5ad > MTX trio.
     # CellRanger formats come first because they are the most common external
     # format and require no preprocessing.
     echo("")
@@ -975,6 +1013,17 @@ def find_inputs(patient_dir, sample, out_dir):
         echo(
             f"  kopya run \\\n"
             f"      --cellranger-h5 {chosen_cellranger_h5} \\\n"
+            f"      --out-dir  {out_dir_str} \\\n"
+            f"      --sample   {sample_name} \\\n"
+            f"      --threads  8"
+        )
+    elif chosen_atera is not None:
+        echo("Recommended input: Form E — Atera output bundle")
+        echo(f"  {chosen_atera}")
+        echo("\nSuggested run command:")
+        echo(
+            f"  kopya run \\\n"
+            f"      --atera    {chosen_atera} \\\n"
             f"      --out-dir  {out_dir_str} \\\n"
             f"      --sample   {sample_name} \\\n"
             f"      --threads  8"
@@ -1007,6 +1056,8 @@ def find_inputs(patient_dir, sample, out_dir):
             "No usable input found. Expected one of:\n"
             "  Form C: <dir>/outs/filtered_feature_bc_matrix/  (CellRanger MTX)\n"
             "  Form D: <dir>/outs/filtered_feature_bc_matrix.h5  (CellRanger H5)\n"
+            "          <dir>/outs/cell_feature_matrix.h5  (Xenium / Atera preview)\n"
+            "  Form E: <dir>/outs/cell_feature_matrix.zarr.zip  (Atera; or unzipped .zarr)\n"
             "  Form A: <dir>/**/raw_counts_ad.h5ad  (or any .h5ad)\n"
             "  Form B: <dir>/**/normalization/{counts.mtx,obs.csv,var.csv}\n\n"
             "Note: .cloupe files are not supported. Use the .h5 or MTX output\n"

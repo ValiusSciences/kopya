@@ -45,7 +45,8 @@ dependencies = [
     "igraph>=0.11",
     "pyucell>=0.6",
     "ruptures>=1.1.9",
-    "pyarrow>=15",
+    "pyarrow>=15,<26",  # pyarrow 26 requires NumPy 2; see the numpy pin above
+    "zarr>=2.18.7,!=3.0.*",  # Atera matrix stores; same range anndata requires
     "click>=8.1",
     "tqdm>=4.66",
 ]
