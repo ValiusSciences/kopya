@@ -100,7 +100,7 @@ This writes `prediction.csv`, `chr_cnv_matrix.csv`, `segments.parquet`, `qc.json
 
 ## Inputs
 
-Four accepted entry forms, all producing identical downstream results, listed most-common first.
+Five accepted entry forms, all producing identical downstream results, listed most-common first.
 
 ### CellRanger directory (Form C)
 
@@ -128,6 +128,18 @@ kopya run --cellranger-h5 outs/filtered_feature_bc_matrix.h5 --out-dir results/ 
 
 > **Loupe files (`.cloupe`) are not supported.** They are a proprietary format with no public parser. Use the `.h5` or `filtered_feature_bc_matrix/` output from the same CellRanger run.
 
+Xenium and the Atera WTA preview datasets write the same H5 layout as `cell_feature_matrix.h5`; pass it to `--cellranger-h5` unchanged. Their control probes and codewords are dropped on load.
+
+### 10x Atera bundle (Form E)
+
+Released Atera output bundles (Atera Onboard Analysis v1.0 and later) ship the count matrix only as an AnnData zarr store, `cell_feature_matrix.zarr.zip`. Point `--atera` at the bundle directory or at that file:
+
+```bash
+kopya run --atera Atera_outs/ --out-dir results/ --sample my-sample
+```
+
+Only the matrix is read, so the rest of the 45–90 GB bundle need not be downloaded or unpacked. Control probes and codewords are dropped, and 10x's per-cell annotations (Azimuth cell types, cell area, centroids) are kept in `obs` for the Python API. An unzipped `cell_feature_matrix.zarr` directory works too.
+
 ### AnnData h5ad (Form A)
 
 `adata.X` (or `layers["counts"]`) holds raw integer UMI counts. `var_names` are HGNC gene symbols. `obs_names` are cell barcodes.
@@ -151,7 +163,7 @@ results/
 
 ### Finding inputs automatically
 
-`find-inputs` searches a directory tree for any of the four forms and prints the ready-to-run command. Detects the CellRanger `outs/` layout, the matrix-trio layout, and any `.h5ad`. Warns clearly if a `.cloupe` file is found.
+`find-inputs` searches a directory tree for any of the five forms and prints the ready-to-run command. Detects the CellRanger `outs/` layout, Xenium-style `cell_feature_matrix.h5`, Atera bundles, the matrix-trio layout, and any `.h5ad`. Warns clearly if a `.cloupe` file is found.
 
 ```bash
 kopya find-inputs --patient-dir /path/to/patient --sample sample-01
@@ -517,7 +529,7 @@ pytest tests/test_cli.py -v     # includes CellRanger format tests
 
 These run on every push and pull request via CI. **If this passes, the pipeline recovers the planted events on the synthetic fixture** (a regression gate, not a proof of correctness).
 
-The CLI tests cover all four input forms end-to-end on the same 500-cell fixture: `--anndata`, `--cellranger-dir`, `--cellranger-h5`, and `--counts/--obs/--var`. The CellRanger fixtures are built programmatically; no 10x Genomics tools required.
+The CLI tests cover all five input forms end-to-end on the same 500-cell fixture: `--anndata`, `--cellranger-dir`, `--cellranger-h5`, `--atera`, and `--counts/--obs/--var`. The CellRanger and Atera fixtures are built programmatically; no 10x Genomics tools required.
 
 Regenerate the fixture only when intentionally changing the planted events:
 

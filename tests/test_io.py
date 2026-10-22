@@ -302,6 +302,81 @@ def test_load_cellranger_h5_roundtrip(tmp_path):
     assert adata.X.format == "csr"
 
 
+def _atera_source():
+    """The shared tiny matrix as an AnnData, for the Atera (Form E) tests."""
+    counts, obs, var = _make_tiny_counts()
+    return AnnData(X=counts, obs=obs, var=var)
+
+
+def _assert_matches_source(adata, source):
+    """Form E output equals the genes-only source: names, layout and counts."""
+    assert adata.shape == source.shape
+    assert list(adata.obs_names) == list(source.obs_names)
+    assert list(adata.var_names) == list(source.var_names)
+    assert adata.X.format == "csr"
+    assert adata.X.indices.dtype == np.int32
+    assert (adata.X != source.X).nnz == 0
+
+
+def test_load_atera_zip_roundtrip(tmp_path):
+    """Form E: a cell_feature_matrix.zarr.zip loads genes only, keyed by barcode/symbol."""
+    from tests.conftest import write_atera_store
+
+    source = _atera_source()
+    zip_path = write_atera_store(source, tmp_path)
+
+    adata = load_counts(atera=zip_path)
+
+    _assert_matches_source(adata, source)
+    assert not any(name.startswith("CTRL_") for name in adata.var_names)
+    # 10x's per-cell labels survive the load; the barcode column became the index.
+    assert "azimuth_broad" in adata.obs
+    assert "barcode" not in adata.obs
+
+
+def test_load_atera_from_output_dir(tmp_path):
+    """Form E accepts the output bundle directory, with the matrix directly in it or under outs/."""
+    from tests.conftest import write_atera_store
+
+    source = _atera_source()
+    write_atera_store(source, tmp_path / "bundle" / "outs")
+
+    _assert_matches_source(load_counts(atera=tmp_path / "bundle"), source)
+    _assert_matches_source(load_counts(atera=tmp_path / "bundle" / "outs"), source)
+
+
+def test_load_atera_unzipped_store(tmp_path):
+    """Form E accepts an unzipped cell_feature_matrix.zarr directory."""
+    from tests.conftest import write_atera_store
+
+    source = _atera_source()
+    store_dir = write_atera_store(source, tmp_path, as_zip=False)
+
+    _assert_matches_source(load_counts(atera=store_dir), source)
+
+
+def test_load_atera_missing_element_names_it(tmp_path):
+    """A store lacking a required element fails with that element's name."""
+    from anndata import read_zarr
+    from tests.conftest import write_atera_store
+
+    # Rewrite the store without obs["barcode"] (anndata consolidates metadata,
+    # so deleting the folder on disk would leave it listed).
+    store_dir = write_atera_store(_atera_source(), tmp_path / "full", as_zip=False)
+    broken = read_zarr(store_dir)
+    del broken.obs["barcode"]
+    broken.write_zarr(tmp_path / "cell_feature_matrix.zarr")
+
+    with pytest.raises(ValueError, match="obs/barcode"):
+        load_counts(atera=tmp_path / "cell_feature_matrix.zarr")
+
+
+def test_load_atera_dir_without_matrix(tmp_path):
+    """A directory with no Atera matrix in it fails with a file-not-found error."""
+    with pytest.raises(FileNotFoundError, match="cell_feature_matrix.zarr.zip"):
+        load_counts(atera=tmp_path)
+
+
 def test_load_rejects_multiple_forms(tmp_path):
     """Passing two input forms at once raises ValueError."""
     counts, obs, var = _make_tiny_counts()

@@ -758,6 +758,80 @@ def test_cellranger_h5_results_consistent_with_h5ad(
 
 
 # ---------------------------------------------------------------------------
+# Atera end-to-end CLI tests (Form E)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def atera_run_output(tmp_path_factory):
+    """Write the fixture as an Atera output bundle, run CLI with --atera, return output dir."""
+    if not FIXTURE_H5AD.exists():
+        pytest.skip(f"fixture not present at {FIXTURE_H5AD}")
+    from anndata import read_h5ad
+    from tests.conftest import write_atera_store
+    adata = read_h5ad(FIXTURE_H5AD)
+
+    work = tmp_path_factory.mktemp("atera")
+    write_atera_store(adata, work / "bundle" / "outs")
+    out_dir = work / "output"
+
+    result = _run_cli([
+        "run",
+        "--atera", str(work / "bundle"),
+        "--out-dir", str(out_dir),
+        "--sample", "atera",
+    ])
+    if result.returncode != 0:
+        pytest.fail(
+            f"CLI exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    return out_dir
+
+
+def test_atera_produces_all_outputs(atera_run_output):
+    """Form E (Atera bundle): pipeline completes and writes all 6 output files."""
+    _assert_cellranger_outputs(atera_run_output, "atera", FIXTURE_N_CELLS)
+
+
+def test_atera_results_match_h5ad(cli_run_output, atera_run_output):
+    """Form E sees the same counts as Form A, so the calls are identical.
+
+    The Atera store adds control features the loader must drop; any leak would
+    change the gene set and so the calls.
+    """
+    pred_h5ad = pd.read_csv(cli_run_output / "prediction.csv", index_col=0)
+    pred_atera = pd.read_csv(atera_run_output / "prediction.csv", index_col=0)
+
+    assert len(pred_h5ad) == len(pred_atera) == FIXTURE_N_CELLS
+    assert (pred_h5ad["class"] == pred_atera.loc[pred_h5ad.index, "class"]).all()
+
+
+def test_find_inputs_detects_atera_bundle(tmp_path):
+    """find-inputs recommends --atera for a released Atera output bundle."""
+    outs = tmp_path / "patient" / "outs"
+    outs.mkdir(parents=True)
+    (outs / "cell_feature_matrix.zarr.zip").write_bytes(b"")
+
+    result = _run_cli(["find-inputs", "--patient-dir", str(tmp_path / "patient")])
+
+    assert result.returncode == 0, result.stderr
+    assert "Form E" in result.stdout
+    assert "--atera" in result.stdout
+
+
+def test_find_inputs_detects_xenium_style_h5(tmp_path):
+    """find-inputs recommends --cellranger-h5 for a Xenium / Atera preview cell_feature_matrix.h5."""
+    outs = tmp_path / "patient" / "outs"
+    outs.mkdir(parents=True)
+    (outs / "cell_feature_matrix.h5").write_bytes(b"")
+
+    result = _run_cli(["find-inputs", "--patient-dir", str(tmp_path / "patient")])
+
+    assert result.returncode == 0, result.stderr
+    assert "Xenium / Atera preview H5" in result.stdout
+    assert "--cellranger-h5" in result.stdout
+
+
+# ---------------------------------------------------------------------------
 # Configurable signature library + non-malignant allow-list (CLI surface)
 # ---------------------------------------------------------------------------
 

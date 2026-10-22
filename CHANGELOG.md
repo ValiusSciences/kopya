@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`--atera` reads released 10x Atera output bundles** (Form E;
+  `load_counts(atera=...)` in Python). Atera Onboard Analysis v1.0+ ships the
+  count matrix only as an AnnData zarr store, `cell_feature_matrix.zarr.zip`,
+  with no `.h5`. `--atera` takes the bundle directory, that file, or an
+  unzipped `.zarr` directory; it keeps "Gene Expression" features only, names
+  genes by `feature_name` and cells by `barcode`, and keeps 10x's per-cell
+  annotations (Azimuth cell types, cell area, centroids) in `obs`. Column
+  indices, stored as int64, are read chunk by chunk into int32: on a
+  399,120-cell kidney bundle (599M nonzeros) the load peaks at 9.5 GiB against
+  16.1 GiB for `anndata.read_zarr`. A store missing an element the loader needs
+  fails with that element's name.
+- **`find-inputs` detects Atera bundles and Xenium-style
+  `cell_feature_matrix.h5`.** The latter is the file Xenium and the Atera WTA
+  preview datasets write; it already loaded with `--cellranger-h5` but was not
+  found under that name.
+
+### Fixed
+
+- **Fresh installs could not write outputs.** `pyarrow` was unpinned while
+  NumPy is pinned below 2 for pyucell; pyarrow 26 requires NumPy 2, so a new
+  environment resolved it and `kopya run` failed writing `segments.parquet`.
+  `pyarrow` is now `>=15,<26`.
+- `zarr` is now a declared dependency (`>=2.18.7,!=3.0.*`, the range anndata
+  already requires), since the Atera loader imports it directly.
+
 ## 2.1.0 — 2026-09-11
 
 ### Added
