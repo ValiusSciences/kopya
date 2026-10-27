@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Documentation
+
+- **Added `docs/atera.md`, an end-to-end guide for 10x Atera data**: which input
+  flag each Atera format needs (`--cellranger-h5` for the Xenium-style preview
+  datasets, `--atera` for released bundles), how to pull just the count matrix
+  out of a 45-90 GB bundle, removing the OR4F17 probe artifact through
+  `--gene-order`, when to lower `--low-dr` on low-depth sections, measured run
+  time and memory, what to check in the output, and reference agreement with
+  10x's cell-group labels on the public breast and cervical preview datasets.
+
 ## 2.2.0 — 2026-10-22
 
 ### Added

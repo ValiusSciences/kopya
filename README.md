@@ -138,7 +138,7 @@ Released Atera output bundles (Atera Onboard Analysis v1.0 and later) ship the c
 kopya run --atera Atera_outs/ --out-dir results/ --sample my-sample
 ```
 
-Only the matrix is read, so the rest of the 45–90 GB bundle need not be downloaded or unpacked. Control probes and codewords are dropped, and 10x's per-cell annotations (Azimuth cell types, cell area, centroids) are kept in `obs` for the Python API. An unzipped `cell_feature_matrix.zarr` directory works too.
+Only the matrix is read, so the rest of the 45–90 GB bundle need not be downloaded or unpacked. For the full workflow and in-situ-specific settings, see [`docs/atera.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/atera.md). Control probes and codewords are dropped, and 10x's per-cell annotations (Azimuth cell types, cell area, centroids) are kept in `obs` for the Python API. An unzipped `cell_feature_matrix.zarr` directory works too.
 
 ### AnnData h5ad (Form A)
 
@@ -575,5 +575,6 @@ Full documentation (acquisition commands, acceptance criteria, per-metric result
 - [`notebooks/working_with_results.ipynb`](https://github.com/ValiusSciences/kopya/blob/main/notebooks/working_with_results.ipynb): a hands-on walkthrough of every output file: what each column means, the numeric scale of each value, and how to re-center the CN matrix into gain/loss
 - [`examples/tiny_simulated/`](https://github.com/ValiusSciences/kopya/tree/main/examples/tiny_simulated): a complete, committed result set (500-cell demo) to explore or diff against
 - [`docs/comparison.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/comparison.md): detailed positioning vs CopyKAT, SCEVAN, inferCNV, CONICSmat, Numbat, CaSpER
+- [`docs/atera.md`](https://github.com/ValiusSciences/kopya/blob/main/docs/atera.md): end-to-end guide for 10x Atera in-situ data: which input flag, getting just the count matrix, recommended settings, resources, and what to check in the output
 - [`tests/external/GOLD_STANDARD_TESTING.md`](https://github.com/ValiusSciences/kopya/blob/main/tests/external/GOLD_STANDARD_TESTING.md): external dataset acquisition, acceptance criteria, results, known limitations
 - `kopya run --help`: full CLI surface with every knob
