@@ -42,6 +42,30 @@ remotezip <outs.zip URL> cell_feature_matrix.h5      # extract one file
 
 On the breast preview bundle this extracts the 398 MB matrix from a 55 GB zip in about 25 seconds.
 
+### The 10X preview datasets
+
+The two public preview datasets used in this guide. The count matrix is in `_outs.zip`; the smaller `_xe_outs.zip` (Xenium Explorer files) does not contain `cell_feature_matrix.h5` and is not needed. `_cell_groups.csv` holds 10X's cell annotations, which the [reference results](#reference-results) compare kopya's calls against.
+
+Breast cancer ([dataset page](https://www.10xgenomics.com/datasets/atera-wta-ffpe-human-breast-cancer)):
+
+```bash
+mkdir -p breast && cd breast
+remotezip https://s3-us-west-2.amazonaws.com/10x.files/samples/atera/dev/WTA_Preview_FFPE_Breast_Cancer/WTA_Preview_FFPE_Breast_Cancer_outs.zip cell_feature_matrix.h5
+curl -O https://cf.10xgenomics.com/samples/atera/dev/WTA_Preview_FFPE_Breast_Cancer/WTA_Preview_FFPE_Breast_Cancer_cell_groups.csv
+cd ..
+```
+
+Cervical cancer ([dataset page](https://www.10xgenomics.com/datasets/atera-wta-ffpe-human-cervical-cancer)):
+
+```bash
+mkdir -p cervical && cd cervical
+remotezip https://s3-us-west-2.amazonaws.com/10x.files/samples/atera/dev/WTA_Preview_FFPE_Cervical_Cancer/WTA_Preview_FFPE_Cervical_Cancer_outs.zip cell_feature_matrix.h5
+curl -O https://cf.10xgenomics.com/samples/atera/dev/WTA_Preview_FFPE_Cervical_Cancer/WTA_Preview_FFPE_Cervical_Cancer_cell_groups.csv
+cd ..
+```
+
+To download a full bundle instead, `curl -O` the same `_outs.zip` URL. The dataset pages also list a gene-group table, an H&E image and its alignment files; kopya uses none of them.
+
 ## 3. Find the input
 
 ```bash
