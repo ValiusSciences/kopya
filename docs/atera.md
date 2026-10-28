@@ -18,10 +18,12 @@ The preview bundles also contain a `cell_feature_matrix.zarr.zip`, but in Xenium
 ## 1. Install
 
 ```bash
-pip install "valius-kopya>=2.2.0"
+pip install "valius-kopya>=2.2.0" "pynndescent<0.7"
 ```
 
 Python 3.11 to 3.13. Version 2.2.0 is the first with `--atera`, and it pins pyarrow below 26 so a fresh install can write its outputs.
+
+Keep the `pynndescent<0.7` pin. pynndescent 0.7.0 returns a sparse type that scanpy 1.11.5's neighbour graph cannot handle, so with it every `kopya run` stops at the subclone step with `AttributeError: 'csr_array' object has no attribute 'getnnz'`, after the run has already spent its full time. pip picks 0.7.0 by default, so a fresh install is affected. Already installed? Run `pip install "pynndescent<0.7"`.
 
 ## 2. Get the count matrix
 
@@ -74,15 +76,21 @@ kopya find-inputs --patient-dir path/to/bundle --sample my-sample
 
 It lists the candidate files and prints a ready-to-run command: `--atera` for a released bundle, `--cellranger-h5` for a preview one.
 
-## 4. Remove the OR4F17 probe artifact
+## 4. Remove probe-artifact genes
 
 ```bash
-grep -v -P "^OR4F17\t" \
+grep -v -P "^(OR4F17|TRIM49D1|PDE4DIP)\t" \
   "$(python -c 'import kopya, pathlib; print(pathlib.Path(kopya.__file__).parent / "data" / "gencode_v49_hg38.tsv")')" \
-  > gene_order_noOR4F17.tsv
+  > gene_order_atera.tsv
 ```
 
-This writes a copy of kopya's bundled gene table without OR4F17, passed to `--gene-order` below. OR4F17 is an olfactory-receptor gene that should be silent in these tissues, yet the Atera panel detects it in most cells: 95% of cells in the breast preview, where it is the second most abundant gene, and 65% in a released v1.0.4 kidney section. Its share of a cell's counts falls with cell size, so small cells (lymphocytes, neutrophils) carry more of it. It is the first gene on chromosome 19, and kopya turns that cell-type-dependent offset into a fake segment at the chromosome tip. Removing it improved every sample tested and costs nothing.
+This writes a copy of kopya's bundled gene table without three genes whose Atera probes read as background rather than expression. The table is passed to `--gene-order` below.
+
+**OR4F17** matters most. It is an olfactory-receptor gene that should be silent in these tissues, yet the Atera panel detects it in most cells: 95% of cells in the breast preview, where it is the second most abundant gene, and 65% in a released v1.0.4 kidney section. Its share of a cell's counts falls with cell size, so small cells (lymphocytes, neutrophils) carry more of it. It is the first gene on chromosome 19, and kopya turns that cell-type-dependent offset into a fake segment at the chromosome tip. Removing it improved every sample tested.
+
+**TRIM49D1** (11q14, normally testis-only) and **PDE4DIP** (1q21) carry the same signature, though weaker. They are detected in about half of breast cells (TRIM49D1 52.7%, PDE4DIP 50.2%). Their counts barely rise with cell size: they sit at the 2nd to 3rd percentile among panel genes of similar detection, where a real transcript scales with the cell. Their levels move together with OR4F17 across 10X's cell groups, highest in myeloid cells, neutrophils and T cells and lowest in fibroblasts, instead of following any lineage. Removing them on top of OR4F17 raised breast tumor recall from 92.5% to 93.2%; on cervical the change was within noise. They cost nothing to drop.
+
+All three are on 10x's probe disallow list for Flex v2, as is **ZNG1A** (9p24). On Atera, ZNG1A behaves like a real transcript: its counts scale with cell size and are highest in tumor and mitotic cells. Removing it changed neither dataset's results, so this guide keeps it. Dropping it as well does no harm if you prefer to follow the Flex list as is.
 
 ## 5. Run
 
@@ -90,7 +98,7 @@ Preview data:
 
 ```bash
 kopya run --cellranger-h5 cell_feature_matrix.h5 \
-  --gene-order gene_order_noOR4F17.tsv \
+  --gene-order gene_order_atera.tsv \
   --out-dir results/ --sample my-sample --threads 8
 ```
 
@@ -98,7 +106,7 @@ Released data, passing the bundle directory or the zip:
 
 ```bash
 kopya run --atera path/to/bundle \
-  --gene-order gene_order_noOR4F17.tsv \
+  --gene-order gene_order_atera.tsv \
   --out-dir results/ --sample my-sample --threads 8
 ```
 
@@ -151,7 +159,10 @@ kopya's calls on the two 10x preview datasets, compared with 10x's own cell-grou
 | --- | --- | --- | --- |
 | Breast, defaults | 0.998 | 0.5% | 91.2% |
 | Breast, OR4F17 removed | 0.997 | 0.6% | 92.5% |
+| Breast, OR4F17, TRIM49D1 and PDE4DIP removed | 0.997 | 0.6% | 93.2% |
 | Cervical, defaults | 0.945 | 6.9% | 80.8% |
+| Cervical, OR4F17 removed | 0.966 | 4.4% | 80.0% |
+| Cervical, OR4F17, TRIM49D1 and PDE4DIP removed | 0.966 | 4.3% | 79.9% |
 | Cervical, OR4F17 removed, `--low-dr 0.02` | 0.977 | 3.7% | 84.2% |
 
 AUC ranks cells by `tumor_score`; the rates use the `class` column. Breast tumor cells are the "11q13 High Grade DCIS" groups; cervical tumor cells are the seven squamous cell carcinoma groups. On breast, kopya also finds the 11q13 (CCND1) gain those cells are named for, plus a distal 11q loss the label does not capture; on cervical, the 3q gain typical of cervical squamous cell carcinoma is the strongest event.
@@ -162,6 +173,7 @@ These labels come from 10x's clustering and marker genes, not from DNA, so the c
 
 - `--atera` on a preview bundle's Xenium-style zarr reports missing elements but does not point to the `.h5`.
 - `find-inputs` labels a preview bundle's zarr "Atera count matrix" and marks it preferred alongside the `.h5` it actually recommends.
-- OR4F17 removal is a manual step; an in-situ probe denylist in kopya would make it automatic.
+- Removing the probe-artifact genes is a manual step; an in-situ probe denylist in kopya would make it automatic.
+- kopya 2.2.0 does not pin pynndescent below 0.7, so a fresh install needs the pin from step 1.
 - `--low-dr` is a fixed detection share; a depth-aware default would remove the low-depth tuning step.
 - Edge smoothing creates the chromosome-end segments described above; a fix that averages over the genes a window covers, instead of repeating the edge gene, raised breast tumor recall from 92.5% to 94.6% in a patched run.
